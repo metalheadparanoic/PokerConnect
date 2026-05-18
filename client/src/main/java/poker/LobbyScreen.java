@@ -23,7 +23,7 @@ public class LobbyScreen {
     private final ServerConnection serverConnection;
     private final Long playerId;
     private final String username;
-    private final Integer playerMoney; // Player's total money
+    private final Integer playerChips; // Player's total chips
     private BorderPane view;
     private TableView<Map<String, Object>> tournamentTable;
     
@@ -32,20 +32,20 @@ public class LobbyScreen {
         this.serverConnection = serverConnection;
         this.playerId = playerId;
         this.username = username;
-        this.playerMoney = fetchPlayerMoney(); // Fetch money from server
+        this.playerChips = fetchPlayerChips(); // Fetch chips from server
         createView();
         loadTournaments();
     }
     
-    private Integer fetchPlayerMoney() {
+    private Integer fetchPlayerChips() {
         try {
             Map<String, Object> playerData = serverConnection.getPlayer(playerId);
-            Object money = playerData.get("money");
-            if (money instanceof Number) {
-                return ((Number) money).intValue();
+            Object chips = playerData.get("chips");
+            if (chips instanceof Number) {
+                return ((Number) chips).intValue();
             }
         } catch (Exception e) {
-            System.err.println("Failed to fetch player money: " + e.getMessage());
+            System.err.println("Failed to fetch player chips: " + e.getMessage());
         }
         return 0;
     }
@@ -89,11 +89,11 @@ public class LobbyScreen {
             "-fx-border-radius: 15;"
         );
         
-        Label balanceTitle = new Label("💰 BALANCE");
+        Label balanceTitle = new Label("🎲 CHIPS");
         balanceTitle.setFont(Font.font("Arial", FontWeight.BOLD, 12));
         balanceTitle.setStyle("-fx-text-fill: #90EE90;");
         
-        Label moneyLabel = new Label("$" + String.format("%,d", playerMoney));
+        Label moneyLabel = new Label("Chips: " + String.format("%,d", playerChips));
         moneyLabel.setFont(Font.font("Arial", FontWeight.BOLD, 22));
         moneyLabel.setStyle("-fx-text-fill: #FFD700;");
         
@@ -192,7 +192,7 @@ public class LobbyScreen {
             "-fx-border-radius: 10;"
         );
         tournamentTable.setPrefHeight(350);
-        tournamentTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        tournamentTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         
         // Style table columns
         TableColumn<Map<String, Object>, String> nameCol = new TableColumn<>("🏆 Tournament Name");
@@ -328,9 +328,8 @@ public class LobbyScreen {
         TextField nameField = new TextField();
         nameField.setPromptText("Tournament Name");
         
-        Spinner<Integer> maxPlayersSpinner = new Spinner<>(2, 10, 6);
+        Spinner<Integer> maxPlayersSpinner = new Spinner<>(2, 6, 6);
         Spinner<Integer> buyInSpinner = new Spinner<>(100, 10000, 1000, 100);
-        Spinner<Integer> chipsSpinner = new Spinner<>(1000, 100000, 10000, 1000);
         
         grid.add(new Label("Name:"), 0, 0);
         grid.add(nameField, 1, 0);
@@ -338,8 +337,6 @@ public class LobbyScreen {
         grid.add(maxPlayersSpinner, 1, 1);
         grid.add(new Label("Buy-in:"), 0, 2);
         grid.add(buyInSpinner, 1, 2);
-        grid.add(new Label("Starting Chips:"), 0, 3);
-        grid.add(chipsSpinner, 1, 3);
         
         dialog.getDialogPane().setContent(grid);
         
@@ -349,7 +346,8 @@ public class LobbyScreen {
                 result.put("name", nameField.getText());
                 result.put("maxPlayers", maxPlayersSpinner.getValue());
                 result.put("buyIn", buyInSpinner.getValue());
-                result.put("startingChips", chipsSpinner.getValue());
+                // Starting chips are always equal to buy-in
+                result.put("startingChips", buyInSpinner.getValue());
                 return result;
             }
             return null;

@@ -16,10 +16,59 @@ import com.google.gson.reflect.TypeToken;
 public class ServerConnection {
     
     // Match server port configured in server/src/main/resources/application.properties
-    private static final String BASE_URL = "http://localhost:8081";
+    private static final String DEFAULT_BASE_URL = "http://localhost:8081";
     private final HttpClient httpClient;
     private final Gson gson;
     private String authToken; // Store JWT token after login
+
+    public static String getBaseUrl() {
+        String override = System.getProperty("poker.serverUrl");
+        if (override == null || override.isBlank()) {
+            override = System.getenv("POKER_SERVER_URL");
+        }
+        if (override == null || override.isBlank()) {
+            override = System.getenv("POKER_SERVER_BASE_URL");
+        }
+
+        String base = (override == null || override.isBlank()) ? DEFAULT_BASE_URL : override.trim();
+        if (!base.startsWith("http://") && !base.startsWith("https://")) {
+            base = "http://" + base;
+        }
+        while (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        return base;
+    }
+
+    public static String getWebSocketUrl(String wsPath) {
+        String base = getBaseUrl();
+        URI uri = URI.create(base);
+
+        String scheme = uri.getScheme();
+        String wsScheme = "https".equalsIgnoreCase(scheme) ? "wss" : "ws";
+        String host = uri.getHost();
+        int port = uri.getPort();
+
+        if (host == null || host.isBlank()) {
+            // Fallback for unusual URIs
+            String authority = uri.getAuthority();
+            host = authority != null ? authority : "localhost";
+            port = -1;
+        }
+
+        String authority = (port == -1) ? host : (host + ":" + port);
+        String path = (wsPath == null || wsPath.isBlank()) ? "/" : (wsPath.startsWith("/") ? wsPath : "/" + wsPath);
+        return wsScheme + "://" + authority + path;
+    }
+
+    // Instance wrappers (avoid static lookups from other classes)
+    public String getBaseUrlValue() {
+        return getBaseUrl();
+    }
+
+    public String getWebSocketUrlValue(String wsPath) {
+        return getWebSocketUrl(wsPath);
+    }
     
     public ServerConnection() {
         this.httpClient = HttpClient.newHttpClient();
@@ -46,7 +95,7 @@ public class ServerConnection {
         String json = gson.toJson(requestBody);
         
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/register"))
+            .uri(URI.create(getBaseUrl() + "/api/register"))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json))
             .build();
@@ -55,7 +104,7 @@ public class ServerConnection {
         try {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (java.net.ConnectException ce) {
-            throw new Exception("Cannot connect to server (is the server running on " + BASE_URL + "?)", ce);
+            throw new Exception("Cannot connect to server (is the server running on " + getBaseUrl() + "?)", ce);
         }
 
         if (response.statusCode() >= 400) {
@@ -94,7 +143,7 @@ public class ServerConnection {
         String json = gson.toJson(requestBody);
         
         HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/login"))
+            .uri(URI.create(getBaseUrl() + "/api/login"))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json))
             .build();
@@ -103,7 +152,7 @@ public class ServerConnection {
         try {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (java.net.ConnectException ce) {
-            throw new Exception("Cannot connect to server (is the server running on " + BASE_URL + "?)", ce);
+            throw new Exception("Cannot connect to server (is the server running on " + getBaseUrl() + "?)", ce);
         }
 
         if (response.statusCode() >= 400) {
@@ -125,7 +174,7 @@ public class ServerConnection {
      */
     public List<Map<String, Object>> getTournaments() throws Exception {
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/tournaments"))
+            .uri(URI.create(getBaseUrl() + "/api/tournaments"))
             .GET();
         
         // Add JWT token if available
@@ -148,7 +197,7 @@ public class ServerConnection {
      */
     public List<Map<String, Object>> getTournamentHistory() throws Exception {
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/tournaments/history"))
+            .uri(URI.create(getBaseUrl() + "/api/tournaments/history"))
             .GET();
         
         // Add JWT token if available
@@ -171,7 +220,7 @@ public class ServerConnection {
      */
     public void deleteAllTournaments() throws Exception {
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/tournaments/deleteAll"))
+            .uri(URI.create(getBaseUrl() + "/api/tournaments/deleteAll"))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.noBody());
         
@@ -193,7 +242,7 @@ public class ServerConnection {
      */
     public Map<String, Object> getPlayer(Long playerId) throws Exception {
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/players/" + playerId))
+            .uri(URI.create(getBaseUrl() + "/api/players/" + playerId))
             .GET();
         
         // Add JWT token if available
@@ -225,7 +274,7 @@ public class ServerConnection {
         String json = gson.toJson(requestBody);
         
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/tournaments"))
+            .uri(URI.create(getBaseUrl() + "/api/tournaments"))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json));
         
@@ -255,7 +304,7 @@ public class ServerConnection {
         String json = gson.toJson(requestBody);
         
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/tournaments/" + tournamentId + "/join"))
+            .uri(URI.create(getBaseUrl() + "/api/tournaments/" + tournamentId + "/join"))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json));
         
@@ -279,11 +328,14 @@ public class ServerConnection {
     /**
      * Leave a tournament.
      */
-    public Map<String, Object> leaveTournament(Long tournamentId) throws Exception {
+    public Map<String, Object> leaveTournament(Long tournamentId, Long playerId) throws Exception {
+        Map<String, Object> requestBody = Map.of("playerId", playerId);
+        String json = gson.toJson(requestBody);
+
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-            .uri(URI.create(BASE_URL + "/api/tournaments/" + tournamentId + "/leave"))
+            .uri(URI.create(getBaseUrl() + "/api/tournaments/" + tournamentId + "/leave"))
             .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.noBody());
+            .POST(HttpRequest.BodyPublishers.ofString(json));
         
         // Add JWT token if available
         if (authToken != null && !authToken.isEmpty()) {

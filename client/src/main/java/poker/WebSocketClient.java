@@ -3,6 +3,8 @@ package poker;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Consumer;
@@ -14,6 +16,8 @@ import java.util.function.Consumer;
 public class WebSocketClient {
 
     private WebSocket webSocket;
+    private final Queue<String> pendingMessages = new ConcurrentLinkedQueue<>();
+    private volatile boolean connected = false;
     @SuppressWarnings("unused")
     private final Consumer<String> onMessageReceived;
 
@@ -37,6 +41,11 @@ public class WebSocketClient {
                     @Override
                     public void onOpen(WebSocket webSocket) {
                         System.out.println("CONNECTED to WebSocket at " + url);
+                        connected = true;
+                        String queued;
+                        while ((queued = pendingMessages.poll()) != null) {
+                            webSocket.sendText(queued, true);
+                        }
                         WebSocket.Listener.super.onOpen(webSocket);
                     }
 
@@ -64,11 +73,25 @@ public class WebSocketClient {
      * @param message The JSON string to send.
      */
     public void sendMessage(String message) {
-        if (webSocket != null) {
+        if (webSocket != null && connected) {
             System.out.println("SENDING: " + message);
             webSocket.sendText(message, true);
         } else {
-            System.err.println("WebSocket is not connected yet! Message queued or dropped.");
+            pendingMessages.offer(message);
+            System.err.println("WebSocket is not connected yet! Message queued.");
+        }
+    }
+
+    /**
+     * Close the WebSocket connection.
+     */
+    public void close() {
+        try {
+            if (webSocket != null) {
+                webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "client leaving");
+            }
+        } catch (Exception e) {
+            System.err.println("WebSocket close error: " + e.getMessage());
         }
     }
 }

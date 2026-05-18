@@ -5,6 +5,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -35,6 +37,8 @@ import poker.server.websocket.GameWebSocketHandler;
 @RequestMapping("/api/tournaments")
 @CrossOrigin(origins = "*")
 public class TournamentController {
+
+    private static final Logger log = LoggerFactory.getLogger(TournamentController.class);
 
     @Autowired
     private GameWebSocketHandler gameWebSocketHandler;
@@ -129,6 +133,10 @@ public class TournamentController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Missing required fields"));
             }
 
+            if (maxPlayers < 2 || maxPlayers > 6) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Max players must be between 2 and 6"));
+            }
+
             TournamentEntity tournament = new TournamentEntity(name, maxPlayers, buyIn, startingChips);
             tournament = tournamentRepository.save(tournament);
             return ResponseEntity.status(HttpStatus.CREATED).body(tournament);
@@ -152,9 +160,9 @@ public class TournamentController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Player not found"));
             }
 
-            if (player.getMoney() < tournament.getBuyIn()) {
+            if (player.getChips() < tournament.getBuyIn()) {
                 return ResponseEntity.status(HttpStatus.PAYMENT_REQUIRED)
-                        .body(Map.of("error", "Insufficient funds"));
+                        .body(Map.of("error", "Insufficient chips"));
             }
 
             if (participantRepository.existsByTournamentIdAndPlayerId(id, playerId)) {
@@ -165,7 +173,7 @@ public class TournamentController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Tournament is full"));
             }
 
-            player.setMoney(player.getMoney() - tournament.getBuyIn());
+            player.setChips(player.getChips() - tournament.getBuyIn());
             playerRepository.save(player);
 
             TournamentParticipant participant = new TournamentParticipant(tournament, player, tournament.getStartingChips());
@@ -177,7 +185,7 @@ public class TournamentController {
             Map<String, Object> response = new HashMap<>();
             response.put("message", "Successfully joined tournament");
             response.put("tournament", tournament);
-            response.put("newBalance", player.getMoney());
+            response.put("newBalance", player.getChips());
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -195,8 +203,16 @@ public class TournamentController {
                 return ResponseEntity.badRequest().body(Map.of("error", "Not in this tournament"));
             }
 
-            participant.setStatus(TournamentParticipant.Status.LEFT);
+            GameService.GameState game = gameService.getGame(id);
+            boolean inProgress = game != null && !"WAITING".equals(game.getPhase()) && !"FINISHED".equals(game.getPhase());
+
+            participant.setStatus(inProgress ? TournamentParticipant.Status.ELIMINATED : TournamentParticipant.Status.LEFT);
             participantRepository.save(participant);
+
+            // If a game exists and isn't finished, eliminate the player immediately
+            if (game != null && !"FINISHED".equals(game.getPhase())) {
+                gameWebSocketHandler.handlePlayerLeft(id, playerId);
+            }
 
             TournamentEntity tournament = participant.getTournament();
             if (tournament.getCurrentPlayers() > 0) {
@@ -237,8 +253,14 @@ public class TournamentController {
             if (allReady && allParticipants.size() >= 2) {
                 TournamentEntity tournament = tournamentRepository.findById(id).orElse(null);
                 if (tournament != null && tournament.getStatus() == TournamentEntity.Status.WAITING) {
+                    // Keep a deterministic seating order (join order) so dealer/blinds rotation
+                    // starts from the player who opened the table.
+                    List<TournamentParticipant> ordered = allParticipants.stream()
+                        .sorted(java.util.Comparator.comparing(TournamentParticipant::getJoinedAt))
+                        .toList();
+
                     List<GamePlayer> gamePlayers = new ArrayList<>();
-                    for (TournamentParticipant tp : allParticipants) {
+                    for (TournamentParticipant tp : ordered) {
                         PlayerEntity p = tp.getPlayer();
                         gamePlayers.add(new GamePlayer(p.getId(), p.getUsername(), tournament.getStartingChips()));
                     }
@@ -266,7 +288,7 @@ public class TournamentController {
             response.put("allReady", allReady);
             return ResponseEntity.ok(response);
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Failed to update ready status for tournament {}", id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Failed to ready: " + e.getMessage()));
         }
     }
@@ -288,7 +310,7 @@ public class TournamentController {
             }
             return ResponseEntity.ok(readyList);
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Failed to get ready status for tournament {}", id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Failed get status: " + e.getMessage()));
         }
     }

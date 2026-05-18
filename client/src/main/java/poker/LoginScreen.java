@@ -14,6 +14,7 @@ import javafx.scene.control.TextField;
 import javafx.scene.effect.DropShadow;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.layout.HBox;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
@@ -35,6 +36,11 @@ public class LoginScreen {
     
     private void createView() {
         view = new StackPane();
+
+        java.net.URL cssUrl = getClass().getResource("/styles/login.css");
+        if (cssUrl != null) {
+            view.getStylesheets().add(cssUrl.toExternalForm());
+        }
         
         // Background with gradient
         view.setStyle("-fx-background: linear-gradient(to bottom, #0f2606, #1a3010, #0d1808);");
@@ -70,12 +76,15 @@ public class LoginScreen {
         suitsTop.setFont(Font.font("Arial", FontWeight.BOLD, 28));
         suitsTop.setStyle("-fx-text-fill: #ffd700;");
         
-        Label title = new Label("POKER TOURNAMENT");
-        title.setFont(Font.font("Arial", FontWeight.BOLD, 42));
+        Label title = new Label("TEXAS HOLD'EM");
+        title.setFont(Font.font("Arial", FontWeight.BOLD, 36));
         title.setStyle(
             "-fx-text-fill: linear-gradient(to bottom, #ffd700, #ffed4e);" +
             "-fx-effect: dropshadow(gaussian, rgba(255,215,0,0.6), 10, 0, 0, 0);"
         );
+        title.setWrapText(true);
+        title.setMaxWidth(420);
+        title.setAlignment(Pos.CENTER);
         
         Label subtitle = new Label("High Stakes • Big Wins");
         subtitle.setFont(Font.font("Arial", FontWeight.NORMAL, 14));
@@ -89,10 +98,18 @@ public class LoginScreen {
         
         // Custom styled tab pane
         TabPane tabPane = new TabPane();
-        tabPane.setMaxWidth(450);
+        tabPane.setPrefWidth(260);
+        tabPane.setMaxWidth(260);
+        tabPane.setMinWidth(260);
+        tabPane.setTabMinWidth(120);
+        tabPane.setTabMaxWidth(120);
+        tabPane.setTabMinHeight(30);
         tabPane.setStyle(
             "-fx-background-color: transparent;" +
-            "-fx-border-color: transparent;"
+            "-fx-border-color: transparent;" +
+            "-fx-tab-min-width: 120;" +
+            "-fx-tab-max-width: 120;" +
+            "-fx-tab-min-height: 30;"
         );
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         
@@ -100,22 +117,37 @@ public class LoginScreen {
         Tab loginTab = new Tab("🎰 LOGIN");
         loginTab.setClosable(false);
         loginTab.setContent(createLoginForm());
-        loginTab.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
+        loginTab.setStyle(
+            "-fx-font-size: 12px;" +
+            "-fx-font-weight: bold;" +
+            "-fx-background-radius: 12 12 0 0;" +
+            "-fx-focus-color: transparent;" +
+            "-fx-faint-focus-color: transparent;"
+        );
         
         // Register tab
         Tab registerTab = new Tab("✨ REGISTER");
         registerTab.setClosable(false);
         registerTab.setContent(createRegisterForm());
-        registerTab.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
+        registerTab.setStyle(
+            "-fx-font-size: 12px;" +
+            "-fx-font-weight: bold;" +
+            "-fx-background-radius: 12 12 0 0;" +
+            "-fx-focus-color: transparent;" +
+            "-fx-faint-focus-color: transparent;"
+        );
         
         tabPane.getTabs().addAll(loginTab, registerTab);
+
+        HBox tabContainer = new HBox(tabPane);
+        tabContainer.setAlignment(Pos.CENTER);
         
         // Footer info
         Label footerLabel = new Label("Welcome to the Ultimate Poker Experience");
         footerLabel.setFont(Font.font("Arial", FontWeight.NORMAL, 12));
         footerLabel.setStyle("-fx-text-fill: #888888;");
         
-        card.getChildren().addAll(titleBox, tabPane, footerLabel);
+        card.getChildren().addAll(titleBox, tabContainer, footerLabel);
         mainContainer.getChildren().add(card);
         
         view.getChildren().add(mainContainer);
