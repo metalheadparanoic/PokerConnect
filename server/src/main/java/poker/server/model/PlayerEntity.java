@@ -1,7 +1,14 @@
 package poker.server.model;
 
-import jakarta.persistence.*;
 import java.time.LocalDateTime;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.Table;
 
 /**
  * JPA Entity representing a player in the poker tournament system.
@@ -30,7 +37,7 @@ public class PlayerEntity {
     private Integer tournamentsWon = 0;
     
     @Column(nullable = false)
-    private Integer money = 10000; // Starting money
+    private Integer chips = 10000; // Starting chips
     
     @Column(nullable = false)
     private LocalDateTime createdAt;
@@ -101,12 +108,12 @@ public class PlayerEntity {
         this.tournamentsWon = tournamentsWon;
     }
     
-    public Integer getMoney() {
-        return money;
+    public Integer getChips() {
+        return chips;
     }
-    
-    public void setMoney(Integer money) {
-        this.money = money;
+
+    public void setChips(Integer chips) {
+        this.chips = chips;
     }
     
     public LocalDateTime getCreatedAt() {

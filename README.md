@@ -56,9 +56,11 @@ JavaFX desktop application:
 
 ## Prerequisites
 
-- **Java 17 or higher** (Java 21 recommended)
+- **Java 21 LTS** (Required - Gradle 8.14 not compatible with Java 25+)
+  - Download from: https://adoptium.net/temurin/releases/?version=21
+  - Set `JAVA_HOME` environment variable to JDK 21 installation path
 - **Docker and Docker Compose** (for PostgreSQL database)
-- **Gradle** (wrapper included)
+- **Gradle** (wrapper included - no separate installation needed)
 
 ## Setup Instructions
 
@@ -66,15 +68,29 @@ JavaFX desktop application:
 
 ```bash
 git clone <repository-url>
-cd Poker_Java
+cd PokerConnect
 ```
 
-### 2. Start the Database
+### 2. Configure Java 21
+
+**Windows:**
+1. Install JDK 21 from Adoptium/Temurin
+2. Set system environment variable:
+   - `JAVA_HOME = C:\Program Files\Java\jdk-21` (adjust path as needed)
+3. Restart your IDE/terminal
+
+**Verify installation:**
+```powershell
+java -version
+# Should show: java version "21.x.x"
+```
+
+### 3. Start the Database
 
 Start PostgreSQL using Docker Compose:
 
 ```bash
-docker-compose up -d db
+docker-compose up -d
 ```
 
 This will:
@@ -82,14 +98,6 @@ This will:
 - Create database `pokerdb`
 - Set up user `poker` with password `pokerpass`
 - Persist data in a Docker volume
-
-### 3. Build the Project
-
-```bash
-./gradlew build
-```
-
-This will compile all modules and run tests.
 
 ### 4. Run the Server
 
@@ -99,11 +107,16 @@ Start the Spring Boot server:
 ./gradlew :server:bootRun
 ```
 
-The server will start on `http://localhost:8080`
+The server will start on `http://localhost:8081` (port 8081)
 
-Database tables will be created automatically via JPA/Hibernate.
+Database tables will be created automatically via Flyway migrations.
 
-### 5. Run the Client
+**Expected output:**
+```
+Started ServerMain in X.XXX seconds
+```
+
+### 5. Run the Client (Local)
 
 In a new terminal, start the JavaFX client:
 
@@ -112,6 +125,96 @@ In a new terminal, start the JavaFX client:
 ```
 
 The client GUI will open showing the login screen.
+
+## 🌐 Playing Online with Friends
+
+The server supports multiplayer connections through WebSocket. Players can connect from different computers.
+
+### Option 1: Local Network (Same WiFi/LAN)
+
+**On the server machine:**
+
+1. Start the server:
+   ```powershell
+   docker-compose up -d
+   ./gradlew :server:bootRun
+   ```
+
+2. Find your local IP address:
+   ```powershell
+   ipconfig
+   ```
+   Look for "IPv4 Address" (e.g., `192.168.1.100`)
+
+3. **(Optional)** Open firewall port 8081:
+   ```powershell
+   New-NetFirewallRule -DisplayName "Poker Server" -Direction Inbound -LocalPort 8081 -Protocol TCP -Action Allow
+   ```
+
+**On client machines (including server machine):**
+
+Set the server URL before running the client:
+
+```powershell
+$env:POKER_SERVER_URL="http://192.168.1.100:8081"
+./gradlew :client:run
+```
+
+Replace `192.168.1.100` with the actual IP address of the server machine.
+
+### Option 2: Internet (ngrok)
+
+For playing over the internet without port forwarding:
+
+1. Download ngrok: https://ngrok.com/download
+2. Start your server locally
+3. Expose the server:
+   ```powershell
+   ngrok http 8081
+   ```
+4. Copy the public URL (e.g., `https://abc123.ngrok.io`)
+5. Players connect with:
+   ```powershell
+   $env:POKER_SERVER_URL="https://abc123.ngrok.io"
+   ./gradlew :client:run
+   ```
+
+### Option 3: Cloud Hosting
+
+For persistent hosting, deploy to cloud platforms:
+
+**Railway.app (Recommended):**
+- Free tier with $5/month credit
+- Automatic PostgreSQL setup
+- Visit: https://railway.app
+
+**Render.com:**
+- Free tier available
+- Manual PostgreSQL configuration
+- Visit: https://render.com
+
+**Fly.io:**
+- Free tier with limitations
+- Docker support
+- Visit: https://fly.io
+
+### Environment Variables
+
+The client supports flexible server configuration:
+
+```powershell
+# Set server URL
+$env:POKER_SERVER_URL="http://localhost:8081"
+
+# Or use Java system property
+./gradlew :client:run -Dpoker.serverUrl=http://localhost:8081
+```
+
+**Priority order:**
+1. `-Dpoker.serverUrl` system property
+2. `POKER_SERVER_URL` environment variable
+3. `POKER_SERVER_BASE_URL` environment variable
+4. Default: `http://localhost:8081`
 
 ## API Endpoints
 
@@ -125,12 +228,29 @@ The client GUI will open showing the login screen.
     "password": "password123"
   }
   ```
+  **Response:**
+  ```json
+  {
+    "message": "Player registered successfully",
+    "playerId": 1,
+    "token": "eyJhbGc..."
+  }
+  ```
 
 - **POST** `/api/login` - Login a player
   ```json
   {
     "username": "player1",
     "password": "password123"
+  }
+  ```
+  **Response:**
+  ```json
+  {
+    "message": "Login successful",
+    "playerId": 1,
+    "token": "eyJhbGc...",
+    "username": "player1"
   }
   ```
 
@@ -147,14 +267,16 @@ The client GUI will open showing the login screen.
   }
   ```
 - **POST** `/api/tournaments/{id}/join` - Join a tournament
+  - Requires `Authorization: Bearer {token}` header
 - **POST** `/api/tournaments/{id}/start` - Start a tournament
 
 ### WebSocket
 
 - **WS** `/game` - Real-time game communication
-  - Connect with player and tournament IDs
+  - Connect with `Authorization: Bearer {token}` header
   - Send actions: FOLD, CALL, RAISE, ALL_IN
-  - Receive game state updates
+  - Receive game state updates in real-time
+  - Automatic broadcasting to all players in tournament
 
 ## Database Configuration
 
@@ -205,19 +327,24 @@ client/build.gradle.kts
 ### Technologies Used
 
 **Backend:**
-- Spring Boot 3.2
+- Spring Boot 3.2.0
 - Spring Data JPA
 - Spring WebSocket
-- PostgreSQL
+- Spring Security (JWT authentication)
+- PostgreSQL 15
+- Flyway (database migrations)
 - Jackson (JSON)
+- jjwt 0.12.3 (JWT tokens)
 
 **Frontend:**
 - JavaFX 21
 - Gson (JSON parsing)
-- Java-WebSocket (WebSocket client)
+- Java HTTP Client (REST calls)
+- Custom WebSocket client
 
 **Common:**
-- Java 21 (can run on Java 17+)
+- Java 21 LTS
+- Gradle 8.14
 
 ### Building Distributions
 
@@ -267,33 +394,65 @@ If the server can't connect to PostgreSQL:
 
 ### Port Already in Use
 
-If port 8080 is already in use:
+If port 8081 is already in use:
 
-1. Find and stop the process using port 8080
+1. Find and stop the process using the port
 2. Or change the server port in `application.properties`:
    ```properties
-   server.port=8081
+   server.port=8082
    ```
-3. Update the client's `ServerConnection.java` BASE_URL accordingly
+3. Update client connection accordingly:
+   ```powershell
+   $env:POKER_SERVER_URL="http://localhost:8082"
+   ```
 
 ### JavaFX Not Working
 
 If JavaFX doesn't start:
 
-1. Ensure you have Java 17 or higher with JavaFX support
+1. Ensure you have JDK 21 with JavaFX support
 2. Check that the JavaFX modules are correctly configured in `client/build.gradle.kts`
+3. Try clearing Gradle cache:
+   ```bash
+   ./gradlew clean
+   ./gradlew :client:run
+   ```
+
+### Java Version Issues
+
+If you see errors about Java version compatibility:
+
+1. Verify Java version: `java -version` (must be 21.x.x)
+2. Check JAVA_HOME: `echo $env:JAVA_HOME` (Windows PowerShell)
+3. Stop Gradle daemon: `./gradlew --stop`
+4. Retry the command
+
+### Client Can't Connect to Server
+
+1. Verify server is running and accessible:
+   ```powershell
+   curl http://localhost:8081/api/tournaments
+   ```
+2. Check firewall settings (especially for remote connections)
+3. Verify the correct IP address and port
+4. Ensure `POKER_SERVER_URL` is set correctly
 
 ## Next Steps for Development
 
-This is a working foundation. Here are features to implement next:
+This is a fully functional multiplayer poker application with online play capabilities. Here are features to enhance further:
 
 ### High Priority
-- [ ] Implement JWT authentication tokens (currently using simple tokens)
+- [x] JWT authentication tokens
+- [x] WebSocket real-time communication
+- [x] Player registration and login
+- [x] Tournament creation and management
+- [x] Game state persistence
+- [x] Multiplayer online support
+- [ ] Implement stronger authentication (currently allows unauthenticated WebSocket for testing)
 - [ ] Use BCrypt for password hashing (currently using SHA-256)
-- [ ] Complete WebSocket integration in GameScreen
-- [ ] Add player-to-tournament relationship table
-- [ ] Implement full game flow (blinds, betting rounds, showdown)
-- [ ] Add hand history and winner determination
+- [ ] Complete betting UI interactions in GameScreen
+- [ ] Add tournament elimination logic
+- [ ] Implement blind increases over time
 
 ### Medium Priority
 - [ ] Implement spectator mode
@@ -302,13 +461,29 @@ This is a working foundation. Here are features to implement next:
 - [ ] Add tournament scheduling
 - [ ] Implement different tournament types (Sit & Go, Multi-table)
 - [ ] Add sound effects
+- [ ] Player statistics and history
 
 ### Low Priority
 - [ ] Add player avatars
 - [ ] Implement themes/skins
-- [ ] Add statistics and analytics
-- [ ] Create admin panel
 - [ ] Add replay functionality
+- [ ] Create admin panel
+- [ ] Mobile client support
+- [ ] AI opponents for practice
+
+## Security Notes
+
+⚠️ **Important for Production:**
+
+1. **WebSocket Authentication:** Currently allows unauthenticated connections for testing. Change line 77 in `WebSocketConfig.java` to `return false;` for production.
+
+2. **Secret Key:** Update JWT secret in `JwtService.java` with a strong, environment-specific key.
+
+3. **Database Credentials:** Use environment variables for production database credentials instead of hardcoded values.
+
+4. **Password Hashing:** Consider migrating from SHA-256 to BCrypt for stronger password security.
+
+5. **HTTPS:** Use HTTPS/WSS in production, not HTTP/WS.
 
 ## Contributing
 

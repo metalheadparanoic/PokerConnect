@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -12,6 +14,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import javafx.animation.KeyFrame;
+import javafx.animation.PauseTransition;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -19,7 +24,7 @@ import javafx.scene.Parent;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
-import javafx.scene.control.Slider;
+import javafx.scene.control.Tooltip;
 import javafx.scene.effect.DropShadow;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -35,12 +40,15 @@ import javafx.scene.shape.Circle;
 import javafx.scene.shape.Rectangle;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
+import javafx.util.Duration;
 
 /**
  * Main poker game screen. Handles the UI layout, WebSocket connection, and
  * real-time game updates.
  */
 public class GameScreen {
+
+    private static final Logger log = Logger.getLogger(GameScreen.class.getName());
 
     private final Main app;
     private final ServerConnection serverConnection;
@@ -49,6 +57,9 @@ public class GameScreen {
     private final Long tournamentId;
     private final String authToken;
     private BorderPane view;
+    // Center stack and optional table background image
+    private StackPane centerStack;
+    private javafx.scene.image.ImageView tableBackgroundImageView;
 
     // WebSocket helper and JSON parser
     private WebSocketClient wsClient;
@@ -57,9 +68,11 @@ public class GameScreen {
     // UI Components
     private Label potLabel;
     private Label currentBetLabel;
+    private Label blindsLabel;
     private Label phaseLabel;
     private Label turnIndicatorLabel;
     private Label myChipsLabel;
+    private Label myPositionLabel;
     private Label myBetLabel;
     private Label timerLabel;
     private HBox communityCardsBox;
@@ -67,7 +80,8 @@ public class GameScreen {
     private HBox readyButtonBox;
     private Label winnerLabel;
     private Pane tablePane;
-    private List<PlayerAvatar> playerAvatars = new ArrayList<>();
+    private Rectangle tableOval;
+    private final List<PlayerAvatar> playerAvatars = new ArrayList<>();
 
     // Container for game controls (Action buttons + Raise slider)
     private VBox controlPanel;
@@ -79,20 +93,49 @@ public class GameScreen {
     private Button raiseButton;
     private Button allInButton;
     
-    // Raise slider
-    private Slider raiseSlider;
+    // Raise controls (chip buttons)
     private Label raiseAmountLabel;
+    private Label minBetLabel;
+    private Button minBetButton;
+    private final int[] chipDenominations = new int[] {5, 10, 20, 50, 100};
+    private final int[] chipCounts = new int[chipDenominations.length];
+    private final List<Button> chipPlusButtons = new ArrayList<>();
+    private final List<Button> chipMinusButtons = new ArrayList<>();
+    private final List<Label> chipCountLabels = new ArrayList<>();
+    private int availableChips = 0; // updated from updateButtonStates
+    private int currentBigBlind = 0;
+    private int currentLastRaiseSize = 0;
 
     private Button readyButton;
     private boolean isReady = false;
 
     // Turn timer
-    private Thread timerThread;
-    private volatile boolean timerRunning = false;
+    private Timeline countdownTimeline;
     
     // Current game state for raise calculations
-    private int currentGameBet = 0;
-    private int myChipsAmount = 0;
+    private int myCurrentBetAmount = 0;
+
+    // UI locks: prevent clicks during dealing/showdown
+    private Integer lastHandNumberSeen = null;
+    private boolean lockInputsUntilNextHand = false;
+    private long lockInputsUntilMs = 0L;
+    private PauseTransition lockReleaseTimer;
+
+    private int lastCommunityCardsCountSeen = -1;
+
+    // Bet chip display cache (keep bets visible during a round)
+    private final java.util.Map<Long, Integer> lastBetAmounts = new java.util.HashMap<>();
+    private String lastPhaseSeen = null;
+
+    // Cached values for re-enabling buttons after a timed lock
+    private boolean cachedIsMyTurn = false;
+    private int cachedGameCurrentBet = 0;
+    private int cachedMyCurrentBet = 0;
+    private int cachedMyChips = 0;
+    private boolean cachedIsWaitingPhase = true;
+
+    private boolean eliminatedAlertShown = false;
+    private boolean finishedAlertShown = false;
 
     /**
      * Represents a player avatar on the table.
@@ -102,12 +145,35 @@ public class GameScreen {
         VBox container;
         Label nameLabel;
         Label chipsLabel;
-        Label betLabel;
+        Label betChipLabel;
         Label readyLabel;
+        Label positionBadge;
         Circle avatar;
         double x, y;
         Long playerId;
-        boolean ready;
+    }
+
+    private static int countActivePlayers(JsonArray players) {
+        int count = 0;
+        for (JsonElement p : players) {
+            if (!p.isJsonObject()) continue;
+            JsonObject pl = p.getAsJsonObject();
+            boolean eliminated = pl.has("eliminated") && !pl.get("eliminated").isJsonNull() && pl.get("eliminated").getAsBoolean();
+            if (!eliminated) count++;
+        }
+        return count;
+    }
+
+    private static int nextNonEliminatedIndexAfter(JsonArray players, int startIndex) {
+        int n = players.size();
+        if (n <= 0) return -1;
+        for (int off = 1; off <= n; off++) {
+            int idx = (startIndex + off) % n;
+            JsonObject pl = players.get(idx).getAsJsonObject();
+            boolean eliminated = pl.has("eliminated") && !pl.get("eliminated").isJsonNull() && pl.get("eliminated").getAsBoolean();
+            if (!eliminated) return idx;
+        }
+        return startIndex;
     }
 
     /**
@@ -131,7 +197,7 @@ public class GameScreen {
      */
     private void connectWebSocket() {
         // Connect to the server endpoint with JWT authentication
-        wsClient = new WebSocketClient("ws://localhost:8081/game", authToken, this::handleMessage);
+        wsClient = new WebSocketClient(serverConnection.getWebSocketUrlValue("/game"), authToken, this::handleMessage);
 
         // Wait briefly for connection, then send JOIN message
         new Thread(() -> {
@@ -163,10 +229,10 @@ public class GameScreen {
                 if ("GAME_STATE".equals(type)) {
                     updateUI(json.get("state").getAsJsonObject());
                 } else if ("ERROR".equals(type)) {
-                    System.err.println("Server Error: " + json.get("message").getAsString());
+                    log.log(Level.WARNING, "Server Error: {0}", json.get("message").getAsString());
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
+            } catch (com.google.gson.JsonSyntaxException | IllegalStateException e) {
+                log.log(Level.WARNING, "Failed to process websocket message", e);
             }
         });
     }
@@ -216,6 +282,18 @@ public class GameScreen {
         timerLabel.setFont(Font.font("Arial", FontWeight.BOLD, 16));
         timerLabel.setStyle("-fx-text-fill: #FF6347;");
 
+        blindsLabel = new Label("Blinds: ?/?");
+        blindsLabel.setFont(Font.font("Arial", FontWeight.BOLD, 13));
+        blindsLabel.setStyle(
+            "-fx-text-fill: #ffffff;" +
+            "-fx-background-color: rgba(0,0,0,0.35);" +
+            "-fx-padding: 6 10;" +
+            "-fx-background-radius: 12;" +
+            "-fx-border-color: rgba(255,255,255,0.2);" +
+            "-fx-border-width: 1;" +
+            "-fx-border-radius: 12;"
+        );
+
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
@@ -237,6 +315,20 @@ public class GameScreen {
         readyButtonBox.getChildren().add(readyButton);
         readyButtonBox.setVisible(false);
         readyButtonBox.setManaged(false);
+
+        myPositionLabel = new Label("");
+        myPositionLabel.setFont(Font.font("Arial", FontWeight.BOLD, 13));
+        myPositionLabel.setStyle(
+            "-fx-text-fill: white;" +
+            "-fx-background-color: rgba(0,0,0,0.4);" +
+            "-fx-padding: 8 12;" +
+            "-fx-background-radius: 15;" +
+            "-fx-border-color: rgba(255,255,255,0.25);" +
+            "-fx-border-width: 1;" +
+            "-fx-border-radius: 15;"
+        );
+        myPositionLabel.setVisible(false);
+        myPositionLabel.setManaged(false);
 
         myChipsLabel = new Label("💰 $0");
         myChipsLabel.setFont(Font.font("Arial", FontWeight.BOLD, 18));
@@ -264,35 +356,47 @@ public class GameScreen {
         ));
         leaveButton.setOnAction(e -> {
             try {
-                serverConnection.leaveTournament(tournamentId);
+                serverConnection.leaveTournament(tournamentId, playerId);
             } catch (Exception ex) {
-                ex.printStackTrace();
+                log.log(Level.WARNING, "Failed to leave tournament", ex);
+            } finally {
+                if (wsClient != null) {
+                    wsClient.close();
+                }
             }
-            app.showLobbyScreen(playerId, username, "");
+            app.showLobbyScreen(playerId, username, authToken);
         });
 
-        topBar.getChildren().addAll(titleLabel, turnIndicatorLabel, timerLabel, spacer, readyButtonBox, myChipsLabel, leaveButton);
+        topBar.getChildren().addAll(titleLabel, turnIndicatorLabel, timerLabel, blindsLabel, spacer, readyButtonBox, myChipsLabel, leaveButton);
     }
     
     private StackPane createCenterArea() {
-        StackPane centerStack = new StackPane();
+        this.centerStack = new StackPane();
         centerStack.setPadding(new Insets(20));
+
+        // Prepare optional background image view (loads /images/table.jpg if present)
+        tableBackgroundImageView = new ImageView();
+        tableBackgroundImageView.setPreserveRatio(false);
+        tableBackgroundImageView.setSmooth(true);
+        tableBackgroundImageView.setVisible(false);
+        tableBackgroundImageView.setManaged(false);
+        // fit size will be bound to tablePane once created below
 
         // Table pane
         tablePane = new Pane();
         // Give extra vertical room so we can render the player's hand BELOW the bottom seat
-        tablePane.setPrefSize(700, 750);
-        tablePane.setMaxSize(700, 750);
+        tablePane.setPrefSize(860, 880);
+        tablePane.setMaxSize(860, 880);
 
         // Poker table oval
-        Rectangle tableOval = new Rectangle(600, 400);
+        tableOval = new Rectangle(740, 500);
         tableOval.setArcWidth(120);
         tableOval.setArcHeight(120);
         tableOval.setFill(Color.web("#2d5a20"));
         tableOval.setStroke(Color.web("#ffd700"));
         tableOval.setStrokeWidth(4);
-        tableOval.setLayoutX(50);
-        tableOval.setLayoutY(75);
+        tableOval.setLayoutX(60);
+        tableOval.setLayoutY(95);
 
         DropShadow tableShadow = new DropShadow();
         tableShadow.setColor(Color.BLACK);
@@ -303,15 +407,16 @@ public class GameScreen {
         // Pot display
         VBox potDisplay = new VBox(5);
         potDisplay.setAlignment(Pos.CENTER);
-        potDisplay.setLayoutX(285);
-        potDisplay.setLayoutY(200);
+        potDisplay.setLayoutX(360);
+        potDisplay.setLayoutY(210);
         potDisplay.setStyle(
-            "-fx-background-color: rgba(0,0,0,0.7);" +
-            "-fx-padding: 12;" +
-            "-fx-background-radius: 40;" +
-            "-fx-border-color: #ffd700;" +
+            "-fx-background-color: rgba(10, 10, 10, 0.78);" +
+            "-fx-padding: 14 18;" +
+            "-fx-background-radius: 24;" +
+            "-fx-border-color: linear-gradient(to right, #ffd700, #ffec8b, #ffd700);" +
             "-fx-border-width: 2;" +
-            "-fx-border-radius: 40;"
+            "-fx-border-radius: 24;" +
+            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.55), 10, 0, 0, 3);"
         );
 
         Label potTitle = new Label("POT");
@@ -319,7 +424,7 @@ public class GameScreen {
         potTitle.setStyle("-fx-text-fill: #ffd700;");
 
         potLabel = new Label("$0");
-        potLabel.setFont(Font.font("Arial", FontWeight.BOLD, 24));
+        potLabel.setFont(Font.font("Arial", FontWeight.EXTRA_BOLD, 26));
         potLabel.setStyle("-fx-text-fill: #ffd700;");
 
         potDisplay.getChildren().addAll(potTitle, potLabel);
@@ -327,8 +432,9 @@ public class GameScreen {
         // Community cards
         communityCardsBox = new HBox(8);
         communityCardsBox.setAlignment(Pos.CENTER);
-        communityCardsBox.setLayoutX(235);
-        communityCardsBox.setLayoutY(300);
+        // Initial position is overridden dynamically in updateUI to keep it centered.
+        communityCardsBox.setLayoutX(310);
+        communityCardsBox.setLayoutY(365);
         communityCardsBox.setStyle(
             "-fx-background-color: rgba(0,0,0,0.5);" +
             "-fx-padding: 8;" +
@@ -337,17 +443,21 @@ public class GameScreen {
 
         // Phase label
         phaseLabel = new Label("WAITING");
-        phaseLabel.setFont(Font.font("Arial", FontWeight.BOLD, 14));
+        phaseLabel.setFont(Font.font("Arial", FontWeight.BOLD, 15));
         phaseLabel.setStyle(
-            "-fx-text-fill: white;" +
-            "-fx-background-color: rgba(0,0,0,0.6);" +
-            "-fx-padding: 5 12;" +
-            "-fx-background-radius: 12;"
+            "-fx-text-fill: #ffffff;" +
+            "-fx-background-color: rgba(0,0,0,0.55);" +
+            "-fx-padding: 6 14;" +
+            "-fx-background-radius: 16;" +
+            "-fx-border-color: rgba(255,255,255,0.2);" +
+            "-fx-border-width: 1;" +
+            "-fx-border-radius: 16;" +
+            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.4), 6, 0, 0, 2);"
         );
-        phaseLabel.setLayoutX(310);
-        phaseLabel.setLayoutY(150);
+        phaseLabel.setLayoutX(400);
+        phaseLabel.setLayoutY(170);
 
-        // Current bet
+        // Current bet (not shown on table; kept for compatibility)
         currentBetLabel = new Label("Bet: $0");
         currentBetLabel.setFont(Font.font("Arial", FontWeight.BOLD, 12));
         currentBetLabel.setStyle(
@@ -356,10 +466,10 @@ public class GameScreen {
             "-fx-padding: 4 10;" +
             "-fx-background-radius: 10;"
         );
-        currentBetLabel.setLayoutX(315);
-        currentBetLabel.setLayoutY(390);
+        currentBetLabel.setVisible(false);
+        currentBetLabel.setManaged(false);
 
-        // Player cards (positioned dynamically under the bottom seat in updateUI)
+        // Player cards (displayed in control panel under the All-In button)
         myBetLabel = new Label("Your Bet: $0");
         myBetLabel.setFont(Font.font("Arial", FontWeight.BOLD, 13));
         myBetLabel.setStyle(
@@ -368,8 +478,8 @@ public class GameScreen {
             "-fx-padding: 5 12;" +
             "-fx-background-radius: 10;"
         );
-        myBetLabel.setLayoutX(285);
-        myBetLabel.setLayoutY(560);
+        myBetLabel.setLayoutX(365);
+        myBetLabel.setLayoutY(685);
 
         playerHandBox = new HBox(10);
         playerHandBox.setAlignment(Pos.CENTER);
@@ -383,8 +493,8 @@ public class GameScreen {
             "-fx-border-width: 2;" +
             "-fx-border-radius: 10;"
         );
-        playerHandBox.setLayoutX(250);
-        playerHandBox.setLayoutY(585);
+        playerHandBox.setLayoutX(330);
+        playerHandBox.setLayoutY(710);
 
         // Winner label
         winnerLabel = new Label("");
@@ -395,18 +505,71 @@ public class GameScreen {
             "-fx-padding: 18;" +
             "-fx-background-radius: 12;"
         );
-        winnerLabel.setLayoutX(250);
-        winnerLabel.setLayoutY(250);
+        winnerLabel.setLayoutX(300);
+        winnerLabel.setLayoutY(290);
         winnerLabel.setVisible(false);
 
-        tablePane.getChildren().addAll(tableOval, potDisplay, communityCardsBox, phaseLabel, currentBetLabel, 
-                                       myBetLabel, playerHandBox, winnerLabel);
+        tablePane.getChildren().addAll(tableOval, potDisplay, communityCardsBox, phaseLabel,
+                   myBetLabel, winnerLabel);
 
         // Stack everything
         StackPane.setAlignment(tablePane, Pos.CENTER);
 
-        centerStack.getChildren().addAll(tablePane);
+        // Add background image behind the table pane
+        centerStack.getChildren().addAll(tableBackgroundImageView, tablePane);
         return centerStack;
+    }
+
+    private void positionCommunityCardsInTableCenter() {
+        if (communityCardsBox == null || tableOval == null || tablePane == null) {
+            return;
+        }
+        if (!communityCardsBox.isVisible()) {
+            return;
+        }
+
+        try {
+            tablePane.applyCss();
+            tablePane.layout();
+            communityCardsBox.applyCss();
+            communityCardsBox.autosize();
+        } catch (Exception ex) {
+            // ignore
+        }
+
+        double boxW = communityCardsBox.getWidth();
+        if (boxW <= 0) {
+            boxW = communityCardsBox.prefWidth(-1);
+        }
+        double boxH = communityCardsBox.getHeight();
+        if (boxH <= 0) {
+            boxH = communityCardsBox.prefHeight(-1);
+        }
+
+        double ovalLeft = tableOval.getLayoutX();
+        double ovalTop = tableOval.getLayoutY();
+        double ovalW = tableOval.getWidth();
+        double ovalH = tableOval.getHeight();
+
+        double centerX = ovalLeft + (ovalW / 2.0);
+        double centerY = ovalTop + (ovalH / 2.0);
+
+        // Slightly below true center so it doesn't crowd the pot/phase labels.
+        double desiredCenterY = centerY + 35;
+        double x = centerX - (boxW / 2.0);
+        double y = desiredCenterY - (boxH / 2.0);
+
+        // Keep the community cards well inside the table and away from the bottom seat UI.
+        double minY = ovalTop + 190;
+        double maxY = ovalTop + ovalH - boxH - 110;
+        if (maxY < minY) {
+            maxY = minY;
+        }
+        if (y < minY) y = minY;
+        if (y > maxY) y = maxY;
+
+        communityCardsBox.setLayoutX(x);
+        communityCardsBox.setLayoutY(y);
     }
 
     private void positionHandUnderBottomSeat() {
@@ -425,18 +588,45 @@ public class GameScreen {
             return;
         }
 
-        double avatarWidth = bottomAvatar.container.getWidth();
-        if (avatarWidth <= 0) {
-            avatarWidth = bottomAvatar.container.getPrefWidth();
+        // Ensure we have a layout pass so bounds are reliable (prevents 0-height measurements)
+        try {
+            if (tablePane != null) {
+                tablePane.applyCss();
+                tablePane.layout();
+            }
+        } catch (Exception ex) {
+            // ignore
         }
 
-        double avatarHeight = bottomAvatar.container.getHeight();
+        // Ensure the avatar container has been laid out so we can read accurate bounds
+        try {
+            bottomAvatar.container.applyCss();
+            bottomAvatar.container.autosize();
+            bottomAvatar.container.layout();
+        } catch (Exception ex) {
+            // layout may not be available in some headless test contexts; ignore
+        }
+
+        // Prefer layout bounds when available; boundsInParent can be 0 before a pulse.
+        double avatarWidth = Math.max(
+            bottomAvatar.container.getBoundsInParent().getWidth(),
+            bottomAvatar.container.getLayoutBounds().getWidth()
+        );
+        if (avatarWidth <= 0) {
+            double prefW = bottomAvatar.container.prefWidth(-1);
+            avatarWidth = prefW > 0 ? prefW : bottomAvatar.container.getPrefWidth();
+        }
+
+        double avatarHeight = Math.max(
+            bottomAvatar.container.getBoundsInParent().getHeight(),
+            bottomAvatar.container.getLayoutBounds().getHeight()
+        );
         if (avatarHeight <= 0) {
             avatarHeight = bottomAvatar.container.prefHeight(-1);
         }
 
-        double bottomCenterX = bottomAvatar.x + (avatarWidth / 2.0);
-        double yCursor = bottomAvatar.y + avatarHeight + 10;
+        double bottomCenterX = bottomAvatar.container.getLayoutX() + (avatarWidth / 2.0);
+        double yCursor = bottomAvatar.container.getLayoutY() + avatarHeight + 12; // safe margin
 
         // Ensure we have usable sizes before centering
         if (myBetLabel.isVisible()) {
@@ -454,10 +644,10 @@ public class GameScreen {
 
             myBetLabel.setLayoutX(bottomCenterX - (betW / 2.0));
             myBetLabel.setLayoutY(yCursor);
-            yCursor += betH + 6;
+            yCursor += betH + 8; // slightly larger spacing to avoid overlap
         }
 
-        if (playerHandBox.isVisible()) {
+        if (playerHandBox.isVisible() && playerHandBox.getParent() == tablePane) {
             playerHandBox.applyCss();
             playerHandBox.autosize();
 
@@ -466,14 +656,14 @@ public class GameScreen {
                 double maxW = playerHandBox.getMaxWidth();
                 handW = maxW > 0 ? maxW : playerHandBox.prefWidth(-1);
             }
-            double handH = playerHandBox.getHeight();
-            if (handH <= 0) {
-                handH = playerHandBox.prefHeight(-1);
-            }
+
+            // Ensure the hand box is placed below the bet label and avatar with enough margin
+            double targetY = yCursor;
+            double minY = bottomAvatar.container.getLayoutY() + avatarHeight + 8;
+            if (targetY < minY) targetY = minY + 6;
 
             playerHandBox.setLayoutX(bottomCenterX - (handW / 2.0));
-            playerHandBox.setLayoutY(yCursor);
-            yCursor += handH + 10;
+            playerHandBox.setLayoutY(targetY);
         }
 
         // Ready button is placed in the top bar, not in the table area.
@@ -524,32 +714,93 @@ public class GameScreen {
         raiseTitle.setFont(Font.font("Arial", FontWeight.BOLD, 12));
         raiseTitle.setStyle("-fx-text-fill: #ffd700;");
 
-        raiseAmountLabel = new Label("$0");
+        raiseAmountLabel = new Label("Chips: 0");
         raiseAmountLabel.setFont(Font.font("Arial", FontWeight.BOLD, 20));
         raiseAmountLabel.setStyle("-fx-text-fill: #FFD700;");
 
-        raiseSlider = new Slider();
-        raiseSlider.setMin(0);
-        raiseSlider.setMax(1000);
-        raiseSlider.setValue(0);
-        raiseSlider.setShowTickMarks(false);
-        raiseSlider.setShowTickLabels(false);
-        raiseSlider.setPrefWidth(180);
-        raiseSlider.setStyle(
-            "-fx-control-inner-background: #2d5a20;" +
-            "-fx-accent: #FFD700;"
-        );
-        raiseSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
-            int amount = newVal.intValue();
-            raiseAmountLabel.setText("$" + amount);
-        });
+        minBetLabel = new Label("Min Bet: $0");
+        minBetLabel.setFont(Font.font("Arial", FontWeight.BOLD, 11));
+        minBetLabel.setStyle("-fx-text-fill: #b0bec5;");
 
-        raiseButton = createActionButton("↑ Raise", "#FFA000");
+        minBetButton = new Button("Set Min");
+        minBetButton.setFont(Font.font("Arial", FontWeight.BOLD, 11));
+        minBetButton.setStyle(
+            "-fx-background-color: #263238;" +
+            "-fx-text-fill: #cfd8dc;" +
+            "-fx-background-radius: 10;" +
+            "-fx-padding: 4 10;" +
+            "-fx-cursor: hand;"
+        );
+        minBetButton.setOnAction(e -> applyMinBetSelection());
+
+        // Chip denomination controls (allow multiple same-chip selection)
+        HBox chipsBox = new HBox(8);
+        chipsBox.setAlignment(Pos.CENTER);
+        String[] colors = new String[] {"#FFFFFF", "#E53935", "#4CAF50", "#3F51B5", "#212121"};
+        for (int i = 0; i < chipDenominations.length; i++) {
+            int val = chipDenominations[i];
+
+            VBox chipUnit = new VBox(4);
+            chipUnit.setAlignment(Pos.CENTER);
+
+            Button chipBtn = new Button(String.valueOf(val));
+            chipBtn.setFont(Font.font("Arial", FontWeight.BOLD, 14));
+            chipBtn.setStyle(
+                "-fx-background-color: " + colors[i] + ";" +
+                "-fx-text-fill: " + (colors[i].equals("#FFFFFF") ? "#000000" : "#FFFFFF") + ";" +
+                "-fx-background-radius: 20;" +
+                "-fx-min-width: 48; -fx-min-height: 36;"
+            );
+            chipBtn.setDisable(true); // main chip button is decorative
+
+            HBox counterBox = new HBox(4);
+            counterBox.setAlignment(Pos.CENTER);
+
+            Button minus = new Button("-");
+            minus.setFont(Font.font("Arial", FontWeight.BOLD, 12));
+            minus.setPrefSize(28, 28);
+            minus.setDisable(true);
+            int idx = i;
+            minus.setOnAction(e -> {
+                if (chipCounts[idx] > 0) chipCounts[idx]--;
+                updateSelectedAmountDisplay();
+            });
+
+            Label countLabel = new Label("0");
+            countLabel.setFont(Font.font("Arial", FontWeight.BOLD, 14));
+            countLabel.setStyle("-fx-text-fill: #FFFFFF;");
+
+            Button plus = new Button("+");
+            plus.setFont(Font.font("Arial", FontWeight.BOLD, 12));
+            plus.setPrefSize(28, 28);
+            plus.setDisable(true);
+            plus.setOnAction(e -> {
+                // Allow increment only if total stays within availableChips
+                int totalSelected = computeSelectedAmount();
+                if (totalSelected + val <= availableChips) {
+                    chipCounts[idx]++;
+                    updateSelectedAmountDisplay();
+                }
+            });
+
+            chipPlusButtons.add(plus);
+            chipMinusButtons.add(minus);
+            chipCountLabels.add(countLabel);
+
+            counterBox.getChildren().addAll(minus, countLabel, plus);
+            chipUnit.getChildren().addAll(chipBtn, counterBox);
+            chipsBox.getChildren().add(chipUnit);
+        }
+
+        raiseButton = createActionButton("↑ Bet / Raise", "#FFA000");
         raiseButton.setOnAction(e -> {
-            int amount = (int) raiseSlider.getValue();
-            if (amount > 0) {
-                performAction("RAISE", amount);
-                raiseSlider.setValue(0);
+            int additional = computeSelectedAmount();
+            if (additional > 0) {
+                int targetTotalBet = myCurrentBetAmount + additional;
+                performAction("RAISE", targetTotalBet);
+                // clear selections
+                for (int j = 0; j < chipCounts.length; j++) chipCounts[j] = 0;
+                updateSelectedAmountDisplay();
             }
         });
 
@@ -559,9 +810,13 @@ public class GameScreen {
         raiseSection.getChildren().addAll(
             raiseTitle,
             raiseAmountLabel,
-            raiseSlider,
+            minBetLabel,
+            minBetButton,
+            chipsBox,
             raiseButton,
-            allInButton
+            allInButton,
+            playerHandBox,
+            myPositionLabel
         );
 
         controlPanel.getChildren().addAll(title, basicActions, separator, raiseSection);
@@ -611,37 +866,91 @@ public class GameScreen {
         if (callButton != null) callButton.setDisable(true);
         if (raiseButton != null) raiseButton.setDisable(true);
         if (allInButton != null) allInButton.setDisable(true);
-        if (raiseSlider != null) raiseSlider.setDisable(true);
+        if (chipPlusButtons != null) {
+            for (Button t : chipPlusButtons) t.setDisable(true);
+        }
+        if (chipMinusButtons != null) {
+            for (Button t : chipMinusButtons) t.setDisable(true);
+        }
     }
 
     /**
      * Updates button availability based on game state.
      */
-    private void updateButtonStates(boolean isMyTurn, int currentBet, int myCurrentBet, int myChips) {
-        if (!isMyTurn) {
+    private void updateButtonStates(boolean isMyTurn, int currentBet, int myCurrentBet, int myChips, boolean lockAllInputs) {
+        if (lockAllInputs) {
             disableAllButtons();
             return;
         }
+        // Always update chip +/- controls so the player can prepare a raise
+        // even before it's their turn. Action buttons (fold/call/raise/all-in)
+        // remain enabled only when it's the player's turn.
+        availableChips = myChips;
+        int currentSelected = computeSelectedAmount();
+        for (int i = 0; i < chipDenominations.length; i++) {
+            int v = chipDenominations[i];
+            boolean plusDisabled = (currentSelected + v) > availableChips;
+            chipPlusButtons.get(i).setDisable(plusDisabled);
+            chipMinusButtons.get(i).setDisable(chipCounts[i] <= 0);
+            chipCountLabels.get(i).setText(String.valueOf(chipCounts[i]));
+        }
 
-        // Enable all buttons
-        foldButton.setDisable(false);
-        raiseButton.setDisable(false);
-        allInButton.setDisable(false);
-        raiseSlider.setDisable(false);
+        updateMinBetLabel(currentBet, myCurrentBet);
 
-        // Update slider range
-        int minRaise = currentBet - myCurrentBet + currentBet;
-        raiseSlider.setMin(Math.max(minRaise, 1));
-        raiseSlider.setMax(myChips);
-        raiseSlider.setValue(minRaise);
+        // Action buttons enabled only when it's my turn
+        if (isMyTurn) {
+            foldButton.setDisable(false);
+            allInButton.setDisable(false);
 
-        // Check vs Call
-        if (currentBet == myCurrentBet) {
-            checkButton.setDisable(false);
-            callButton.setDisable(true);
+            // Check vs Call
+            if (currentBet == myCurrentBet) {
+                checkButton.setDisable(false);
+                callButton.setDisable(true);
+            } else {
+                checkButton.setDisable(true);
+                callButton.setDisable(false);
+            }
+
+            // Poker rules (no-limit style): you can bet/raise on your turn.
+            // - If you select enough to reach/exceed current bet => valid (call/raise).
+            // - If you select less than current bet => only valid if you're all-in (short call).
+            int additional = computeSelectedAmount();
+            int targetTotalBet = myCurrentBetAmount + additional;
+            boolean isAllIn = additional > 0 && additional >= availableChips;
+            boolean putsMoreChips = additional > 0 && targetTotalBet > myCurrentBetAmount;
+            int minTotalBet = computeMinTotalBet(currentBet, myCurrentBet);
+            boolean meetsMin = targetTotalBet >= minTotalBet;
+            boolean canBetRaise = putsMoreChips && (meetsMin || isAllIn);
+            raiseButton.setDisable(!canBetRaise);
         } else {
+            // Not my turn: disable action buttons but keep chip selection available
+            foldButton.setDisable(true);
             checkButton.setDisable(true);
-            callButton.setDisable(false);
+            callButton.setDisable(true);
+            raiseButton.setDisable(true);
+            allInButton.setDisable(true);
+        }
+    }
+
+    private int computeMinTotalBet(int currentBet, int myCurrentBet) {
+        int bb = Math.max(1, currentBigBlind);
+        if (currentBet <= 0) {
+            return bb;
+        }
+        int minRaiseSize = Math.max(bb, Math.max(0, currentLastRaiseSize));
+        return currentBet + minRaiseSize;
+    }
+
+    private void updateMinBetLabel(int currentBet, int myCurrentBet) {
+        if (minBetLabel == null) return;
+        int minTotalBet = computeMinTotalBet(currentBet, myCurrentBet);
+        if (currentBet <= 0) {
+            minBetLabel.setText("Min Bet: $" + minTotalBet);
+        } else {
+            minBetLabel.setText("Min Raise To: $" + minTotalBet);
+        }
+        if (minBetButton != null) {
+            minBetButton.setDisable(minTotalBet <= myCurrentBetAmount || availableChips <= 0);
         }
     }
 
@@ -649,12 +958,104 @@ public class GameScreen {
      * Sends a player action to the server via WebSocket.
      */
     private void performAction(String action, int amount) {
+        if (isInputLockedNow()) {
+            return;
+        }
         Map<String, Object> msg = Map.of(
                 "type", "ACTION",
                 "action", action,
                 "amount", amount
         );
         wsClient.sendMessage(gson.toJson(msg));
+    }
+
+    private boolean isInputLockedNow() {
+        if (cachedIsWaitingPhase) return true;
+        if (lockInputsUntilNextHand) return true;
+        return System.currentTimeMillis() < lockInputsUntilMs;
+    }
+
+    private void lockInputsTemporarily(long millis) {
+        long until = System.currentTimeMillis() + Math.max(0, millis);
+        lockInputsUntilMs = Math.max(lockInputsUntilMs, until);
+
+        // Disable now
+        disableAllButtons();
+
+        // Re-enable after delay using cached state (so we don't depend on a new server update)
+        if (lockReleaseTimer != null) {
+            lockReleaseTimer.stop();
+        }
+        lockReleaseTimer = new PauseTransition(Duration.millis(Math.max(10, millis)));
+        lockReleaseTimer.setOnFinished(e -> {
+            boolean locked = isInputLockedNow();
+            updateButtonStates(cachedIsMyTurn, cachedGameCurrentBet, cachedMyCurrentBet, cachedMyChips, locked);
+        });
+        lockReleaseTimer.playFromStart();
+    }
+
+    private int computeSelectedAmount() {
+        int sum = 0;
+        for (int i = 0; i < chipDenominations.length; i++) {
+            sum += chipDenominations[i] * chipCounts[i];
+        }
+        return sum;
+    }
+
+    private void applyMinBetSelection() {
+        int minTotalBet = computeMinTotalBet(cachedGameCurrentBet, cachedMyCurrentBet);
+        int needed = Math.max(0, minTotalBet - myCurrentBetAmount);
+        if (needed <= 0) {
+            return;
+        }
+        int remaining = Math.min(needed, availableChips);
+        // Clear current selection
+        for (int i = 0; i < chipCounts.length; i++) {
+            chipCounts[i] = 0;
+        }
+
+        // Greedy fill from largest to smallest denomination
+        for (int i = chipDenominations.length - 1; i >= 0; i--) {
+            int denom = chipDenominations[i];
+            if (denom <= 0) continue;
+            int count = remaining / denom;
+            if (count > 0) {
+                chipCounts[i] = count;
+                remaining -= count * denom;
+            }
+        }
+
+        updateSelectedAmountDisplay();
+    }
+
+    private void updateSelectedAmountDisplay() {
+        int additional = computeSelectedAmount();
+        int targetTotalBet = myCurrentBetAmount + additional;
+        if (additional <= 0) {
+            raiseAmountLabel.setText("Bet/Raise: +0");
+        } else {
+            raiseAmountLabel.setText("Bet/Raise: +" + additional + " (To: " + targetTotalBet + ")");
+        }
+        updateMinBetLabel(cachedGameCurrentBet, cachedMyCurrentBet);
+        // update labels for counts
+        for (int i = 0; i < chipCountLabels.size(); i++) {
+            chipCountLabels.get(i).setText(String.valueOf(chipCounts[i]));
+        }
+        // refresh plus/minus enablement according to availableChips
+        int currentSelected = additional;
+        for (int i = 0; i < chipDenominations.length; i++) {
+            int v = chipDenominations[i];
+            if (i < chipPlusButtons.size()) {
+                chipPlusButtons.get(i).setDisable((currentSelected + v) > availableChips);
+            }
+            if (i < chipMinusButtons.size()) {
+                chipMinusButtons.get(i).setDisable(chipCounts[i] <= 0);
+            }
+        }
+
+        // Refresh action button enablement after chip changes
+        boolean lockAllInputs = isInputLockedNow();
+        updateButtonStates(cachedIsMyTurn, cachedGameCurrentBet, cachedMyCurrentBet, cachedMyChips, lockAllInputs);
     }
 
     /**
@@ -675,18 +1076,18 @@ public class GameScreen {
 
         // Send ready status to server
         try {
-            String url = "http://localhost:8081/api/tournaments/" + tournamentId + "/ready";
+            String url = serverConnection.getBaseUrlValue() + "/api/tournaments/" + tournamentId + "/ready";
             String json = "{\"playerId\":" + playerId + ",\"ready\":" + isReady + "}";
 
             new Thread(() -> {
                 try {
                     serverConnection.post(url, json);
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    log.log(Level.WARNING, "Failed to send ready status", e);
                 }
             }).start();
         } catch (Exception e) {
-            e.printStackTrace();
+            log.log(Level.WARNING, "Failed to toggle ready", e);
         }
     }
 
@@ -696,7 +1097,7 @@ public class GameScreen {
     private void fetchReadyStatus() {
         new Thread(() -> {
             try {
-                String url = "http://localhost:8081/api/tournaments/" + tournamentId + "/ready";
+                String url = serverConnection.getBaseUrlValue() + "/api/tournaments/" + tournamentId + "/ready";
                 String response = serverConnection.get(url);
 
                 Platform.runLater(() -> {
@@ -712,7 +1113,6 @@ public class GameScreen {
                             // Find matching avatar and update
                             for (PlayerAvatar avatar : playerAvatars) {
                                 if (avatar.playerId == pId) {
-                                    avatar.ready = ready;
                                     if (ready) {
                                         avatar.readyLabel.setText("✓ READY");
                                         avatar.readyLabel.setVisible(true);
@@ -724,12 +1124,12 @@ public class GameScreen {
                                 }
                             }
                         }
-                    } catch (Exception e) {
-                        e.printStackTrace();
+                    } catch (com.google.gson.JsonSyntaxException | IllegalStateException e) {
+                        log.log(Level.FINE, "Failed to parse/update ready status", e);
                     }
                 });
             } catch (Exception e) {
-                e.printStackTrace();
+                log.log(Level.FINE, "Failed to fetch ready status", e);
             }
         }).start();
     }
@@ -745,8 +1145,28 @@ public class GameScreen {
         potLabel.setText("$" + state.get("pot").getAsInt());
         currentBetLabel.setText("Bet: $" + state.get("currentBet").getAsInt());
 
+        int handNumber = -1;
+        if (state.has("handNumber") && !state.get("handNumber").isJsonNull()) {
+            try {
+                handNumber = state.get("handNumber").getAsInt();
+            } catch (Exception ignored) {
+            }
+        }
+
+        int smallBlindAmount = state.has("smallBlind") ? state.get("smallBlind").getAsInt() : -1;
+        int bigBlindAmount = state.has("bigBlind") ? state.get("bigBlind").getAsInt() : -1;
+        currentLastRaiseSize = state.has("lastRaiseSize") ? state.get("lastRaiseSize").getAsInt() : 0;
+        if (smallBlindAmount > 0 && bigBlindAmount > 0) {
+            blindsLabel.setText("Blinds: $" + smallBlindAmount + "/$" + bigBlindAmount);
+            currentBigBlind = bigBlindAmount;
+        } else {
+            blindsLabel.setText("Blinds: ?/?");
+            currentBigBlind = 0;
+        }
+
         // Show/hide ready button based on phase
         boolean isWaitingPhase = "WAITING".equals(phase);
+        cachedIsWaitingPhase = isWaitingPhase;
         readyButtonBox.setVisible(isWaitingPhase);
         readyButtonBox.setManaged(isWaitingPhase);
         readyButton.setVisible(isWaitingPhase);
@@ -758,9 +1178,12 @@ public class GameScreen {
         playerHandBox.setVisible(showHandUi);
         playerHandBox.setManaged(showHandUi);
 
-        // Current bet label looks like an opaque overlay when waiting
-        currentBetLabel.setVisible(!isWaitingPhase);
-        currentBetLabel.setManaged(!isWaitingPhase);
+        // Blinds label lives in the top bar
+        blindsLabel.setVisible(!isWaitingPhase);
+        blindsLabel.setManaged(!isWaitingPhase);
+
+        myPositionLabel.setVisible(!isWaitingPhase);
+        myPositionLabel.setManaged(!isWaitingPhase);
 
         // Show/hide controls
         if (controlPanel != null) {
@@ -803,26 +1226,95 @@ public class GameScreen {
         boolean showCommunity = !isWaitingPhase && communityCards.size() > 0;
         communityCardsBox.setVisible(showCommunity);
         communityCardsBox.setManaged(showCommunity);
+        if (showCommunity) {
+            Platform.runLater(this::positionCommunityCardsInTableCenter);
+        }
 
         // Get current player index
         int currentPlayerIndex = state.has("currentPlayerIndex") ? state.get("currentPlayerIndex").getAsInt() : -1;
 
+        // --- Texas Hold'em input locks ---
+        // Short lock while new community cards are dealt; after showdown, lock until next hand.
+
+        // New hand clears the long lock.
+        if (lastHandNumberSeen != null && handNumber != -1 && handNumber != lastHandNumberSeen) {
+            lockInputsUntilNextHand = false;
+            lockInputsUntilMs = 0L;
+        }
+
+        int communityCount = communityCards.size();
+        if (lastCommunityCardsCountSeen >= 0 && communityCount > lastCommunityCardsCountSeen
+                && ("FLOP".equals(phase) || "TURN".equals(phase) || "RIVER".equals(phase))) {
+            lockInputsTemporarily(700);
+        }
+        lastCommunityCardsCountSeen = communityCount;
+
+        if (lastWinner != null && !lastWinner.isEmpty() && ("SHOWDOWN".equals(phase) || "FINISHED".equals(phase))) {
+            lockInputsUntilNextHand = true;
+        }
+
+        // Between betting rounds the server may briefly send -1; keep inputs locked.
+        if (!isWaitingPhase && currentPlayerIndex < 0) {
+            lockInputsTemporarily(500);
+        }
+
+        if (handNumber != -1) {
+            lastHandNumberSeen = handNumber;
+        }
+
         // Update Players around table
         JsonArray players = state.get("players").getAsJsonArray();
+
+        // Clear bet cache when phase changes (new betting round)
+        boolean phaseChanged = lastPhaseSeen != null && !lastPhaseSeen.equals(phase);
+        if (phaseChanged) {
+            lastBetAmounts.clear();
+        }
         int myChips = 0;
         int myCurrentBet = 0;
         boolean isMyTurn = false;
 
-        // Clear old avatars
-        playerAvatars.forEach(avatar -> tablePane.getChildren().remove(avatar.container));
+        // Dealer / blinds positions (computed client-side from dealerButtonIndex + active players)
+        int dealerIndex = state.has("dealerButtonIndex") ? state.get("dealerButtonIndex").getAsInt() : -1;
+        int smallBlindIndex = -1;
+        int bigBlindIndex = -1;
+        if (dealerIndex >= 0 && dealerIndex < players.size()) {
+            int activeCount = countActivePlayers(players);
+            if (activeCount >= 2) {
+                if (activeCount == 2) {
+                    // Heads-up rule: dealer posts small blind
+                    smallBlindIndex = dealerIndex;
+                    bigBlindIndex = nextNonEliminatedIndexAfter(players, dealerIndex);
+                } else {
+                    smallBlindIndex = nextNonEliminatedIndexAfter(players, dealerIndex);
+                    bigBlindIndex = nextNonEliminatedIndexAfter(players, smallBlindIndex);
+                }
+            }
+        }
+
+        // Clear old avatars and their bet chips
+        playerAvatars.forEach(avatar -> {
+            if (avatar.container != null) {
+                tablePane.getChildren().remove(avatar.container);
+            }
+            if (avatar.betChipLabel != null) {
+                tablePane.getChildren().remove(avatar.betChipLabel);
+            }
+        });
         playerAvatars.clear();
 
         // Position players around oval table
         int numPlayers = players.size();
-        double centerX = 350;
-        double centerY = 275;
-        double radiusX = 320;
-        double radiusY = 210;
+        double ovalLeftForSeats = (tableOval != null) ? tableOval.getLayoutX() : 60;
+        double ovalTopForSeats = (tableOval != null) ? tableOval.getLayoutY() : 95;
+        double ovalWForSeats = (tableOval != null) ? tableOval.getWidth() : 740;
+        double ovalHForSeats = (tableOval != null) ? tableOval.getHeight() : 500;
+
+        double centerX = ovalLeftForSeats + (ovalWForSeats / 2.0);
+        double centerY = ovalTopForSeats + (ovalHForSeats / 2.0);
+        // Put seats slightly outside the felt.
+        double radiusX = (ovalWForSeats / 2.0) + 40;
+        double radiusY = (ovalHForSeats / 2.0) + 30;
 
         // Rotate seating so the local player is always displayed at the bottom.
         int myIndex = -1;
@@ -833,6 +1325,47 @@ public class GameScreen {
                 myIndex = i;
                 break;
             }
+        }
+
+        // If we have multiple players connected, try to show the table background image
+        try {
+            if (players.size() > 1 && tableBackgroundImageView != null && !tableBackgroundImageView.isVisible()) {
+                // attempt to load resource if not already loaded
+                if (tableBackgroundImageView.getImage() == null) {
+                    java.net.URL url = getClass().getResource("/images/table.jpg");
+                    if (url != null) {
+                        javafx.scene.image.Image img = new javafx.scene.image.Image(url.toString(), false);
+                        tableBackgroundImageView.setImage(img);
+                        // Bind sizing to the table pane area
+                        tableBackgroundImageView.fitWidthProperty().bind(tablePane.widthProperty().add(100));
+                        tableBackgroundImageView.fitHeightProperty().bind(tablePane.heightProperty().add(160));
+                        // apply image as table fill
+                        try {
+                            tableOval.setFill(new javafx.scene.paint.ImagePattern(img));
+                        } catch (Exception ex) {
+                        }
+                    } else {
+                        // Fallback to a remote Commons image if no local resource is available
+                        String remote = "https://upload.wikimedia.org/wikipedia/commons/9/96/World_Poker_Tour_table_1.jpg";
+                        javafx.scene.image.Image img = new javafx.scene.image.Image(remote, true);
+                        tableBackgroundImageView.setImage(img);
+                        tableBackgroundImageView.fitWidthProperty().bind(tablePane.widthProperty().add(100));
+                        tableBackgroundImageView.fitHeightProperty().bind(tablePane.heightProperty().add(160));
+                        try {
+                            tableOval.setFill(new javafx.scene.paint.ImagePattern(img));
+                        } catch (Exception ex) {
+                        }
+                    }
+                }
+
+                if (tableBackgroundImageView.getImage() != null) {
+                    tableBackgroundImageView.setVisible(true);
+                }
+            } else if (players.size() <= 1 && tableBackgroundImageView != null) {
+                tableBackgroundImageView.setVisible(false);
+            }
+        } catch (Exception ex) {
+            // If anything fails, silently ignore and keep existing gradient background
         }
 
         for (int i = 0; i < numPlayers; i++) {
@@ -852,11 +1385,37 @@ public class GameScreen {
             boolean eliminated = player.has("eliminated") && player.get("eliminated").getAsBoolean();
             int currentBet = player.get("currentBet").getAsInt();
 
+            String positionTag = "";
+            if (i == dealerIndex) {
+                positionTag = "D";
+            }
+            if (i == smallBlindIndex) {
+                positionTag = positionTag.isEmpty() ? "SB" : (positionTag + "/SB");
+            }
+            if (i == bigBlindIndex) {
+                positionTag = positionTag.isEmpty() ? "BB" : (positionTag + "/BB");
+            }
+
+            StringBuilder positionTooltip = new StringBuilder();
+            if (i == dealerIndex) {
+                positionTooltip.append("Dealer button");
+            }
+            if (i == smallBlindIndex) {
+                if (!positionTooltip.isEmpty()) positionTooltip.append("\n");
+                positionTooltip.append("Small Blind");
+                if (smallBlindAmount > 0) positionTooltip.append(" ($").append(smallBlindAmount).append(")");
+            }
+            if (i == bigBlindIndex) {
+                if (!positionTooltip.isEmpty()) positionTooltip.append("\n");
+                positionTooltip.append("Big Blind");
+                if (bigBlindAmount > 0) positionTooltip.append(" ($").append(bigBlindAmount).append(")");
+            }
+
             // Track my info for button states
             if (pId == playerId) {
                 myChips = chips;
                 myCurrentBet = currentBet;
-                myChipsAmount = chips;
+                myCurrentBetAmount = currentBet;
                 isMyTurn = (myIndex == currentPlayerIndex) && !eliminated;
                 myChipsLabel.setText("💰 $" + chips);
                 myBetLabel.setText("Your Bet: $" + currentBet);
@@ -875,15 +1434,111 @@ public class GameScreen {
 
             // Create player avatar
             PlayerAvatar avatar = createPlayerAvatar(pName, chips, currentBet, folded, eliminated,
-                    i == currentPlayerIndex, lastWinner != null && lastWinner.contains(pName), pId == playerId);
+                    i == currentPlayerIndex, lastWinner != null && lastWinner.contains(pName), pId == playerId, positionTag);
+
+            if (avatar.positionBadge != null && avatar.positionBadge.isVisible() && !positionTooltip.isEmpty()) {
+                avatar.positionBadge.setStyle(avatar.positionBadge.getStyle() + "-fx-cursor: hand;");
+                Tooltip tooltip = new Tooltip(positionTooltip.toString());
+                tooltip.setShowDelay(javafx.util.Duration.millis(150));
+                tooltip.setHideDelay(javafx.util.Duration.millis(50));
+                Tooltip.install(avatar.positionBadge, tooltip);
+            }
             avatar.x = x - 50;
             avatar.y = y - 60;
             avatar.playerId = pId;
             avatar.container.setLayoutX(avatar.x);
             avatar.container.setLayoutY(avatar.y);
 
+            // Bet chip display (placed toward the table center from the player)
+            if (avatar.betChipLabel != null) {
+                int displayBet = currentBet;
+                if (displayBet <= 0 && lastBetAmounts.containsKey(pId)) {
+                    displayBet = lastBetAmounts.getOrDefault(pId, 0);
+                }
+
+                if (displayBet > 0) {
+                    avatar.betChipLabel.setText("$" + displayBet);
+                    avatar.betChipLabel.setVisible(true);
+                    avatar.betChipLabel.setManaged(true);
+
+                    double avatarCenterX = avatar.container.getLayoutX() + (avatar.container.getPrefWidth() / 2.0);
+                    double avatarCenterY = avatar.container.getLayoutY() + 25; // near avatar center
+                    double dx = centerX - avatarCenterX;
+                    double dy = centerY - avatarCenterY;
+                    double len = Math.sqrt(dx * dx + dy * dy);
+                    double offset = 30;
+                    double chipX = avatarCenterX;
+                    double chipY = avatarCenterY;
+                    if (len > 0.1) {
+                        chipX = avatarCenterX + (dx / len) * offset;
+                        chipY = avatarCenterY + (dy / len) * offset;
+                    }
+                    avatar.betChipLabel.relocate(chipX - 15, chipY - 10);
+                } else {
+                    avatar.betChipLabel.setVisible(false);
+                    avatar.betChipLabel.setManaged(false);
+                }
+            }
+
             playerAvatars.add(avatar);
             tablePane.getChildren().add(avatar.container);
+            if (avatar.betChipLabel != null) {
+                tablePane.getChildren().add(avatar.betChipLabel);
+            }
+        }
+
+        // Update cached bet amounts when there are active bets
+        for (JsonElement p : players) {
+            if (!p.isJsonObject()) continue;
+            JsonObject pl = p.getAsJsonObject();
+            long pId = pl.has("playerId") ? pl.get("playerId").getAsLong() : pl.get("id").getAsLong();
+            int cb = pl.has("currentBet") ? pl.get("currentBet").getAsInt() : 0;
+            if (cb > 0) {
+                lastBetAmounts.put(pId, cb);
+            }
+        }
+
+        lastPhaseSeen = phase;
+
+        // Update my position badge (top bar)
+        if (!isWaitingPhase) {
+            String myPos = "";
+            if (myIndex == dealerIndex) myPos = "Dealer";
+            if (myIndex == smallBlindIndex) myPos = myPos.isEmpty() ? "Small Blind" : (myPos + " / Small Blind");
+            if (myIndex == bigBlindIndex) myPos = myPos.isEmpty() ? "Big Blind" : (myPos + " / Big Blind");
+
+            if (myPos.isEmpty()) {
+                myPositionLabel.setText("Position: —");
+                myPositionLabel.setStyle(
+                    "-fx-text-fill: white;" +
+                    "-fx-background-color: rgba(0,0,0,0.4);" +
+                    "-fx-padding: 8 12;" +
+                    "-fx-background-radius: 15;" +
+                    "-fx-border-color: rgba(255,255,255,0.25);" +
+                    "-fx-border-width: 1;" +
+                    "-fx-border-radius: 15;"
+                );
+            } else {
+                String extra = "";
+                if (myIndex == smallBlindIndex && smallBlindAmount > 0) extra = " ($" + smallBlindAmount + ")";
+                if (myIndex == bigBlindIndex && bigBlindAmount > 0) extra = " ($" + bigBlindAmount + ")";
+
+                String accent = (myIndex == bigBlindIndex) ? "#ff5252" : (myIndex == smallBlindIndex) ? "#4fc3f7" : "#ffffff";
+                String textColor = (myIndex == bigBlindIndex) ? "#ffffff" : "#000000";
+                myPositionLabel.setText("Position: " + myPos + extra);
+                myPositionLabel.setStyle(
+                    "-fx-text-fill: " + textColor + ";" +
+                    "-fx-background-color: " + accent + ";" +
+                    "-fx-padding: 8 12;" +
+                    "-fx-background-radius: 15;" +
+                    "-fx-border-color: rgba(0,0,0,0.25);" +
+                    "-fx-border-width: 1;" +
+                    "-fx-border-radius: 15;" +
+                    "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.35), 6, 0, 0, 2);"
+                );
+            }
+        } else {
+            myPositionLabel.setText("");
         }
 
         // --- DETECȚIE ELIMINARE ---
@@ -908,31 +1563,40 @@ public class GameScreen {
         if ("FINISHED".equals(phase)) {
             // Check if I'm the winner by looking for my eliminated status
             boolean iAmWinner = !amIEliminated && amIStillInGame;
-            
-            Platform.runLater(() -> {
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setTitle("Tournament Finished");
-                
-                if (iAmWinner) {
-                    alert.setHeaderText("🏆 Congratulations! You Won! 🏆");
-                    alert.setContentText(finalLastWinner + "\n\nYou can now leave and collect your winnings.");
-                } else {
-                    alert.setHeaderText("Tournament Complete");
-                    alert.setContentText(finalLastWinner != null ? finalLastWinner : "The tournament has ended.");
-                }
-                
-                alert.showAndWait();
-            });
+
+            if (!finishedAlertShown) {
+                finishedAlertShown = true;
+                Platform.runLater(() -> {
+                    Alert alert = new Alert(Alert.AlertType.INFORMATION);
+                    alert.setTitle("Tournament Finished");
+
+                    if (iAmWinner) {
+                        alert.setHeaderText("🏆 Congratulations! You Won! 🏆");
+                        alert.setContentText(finalLastWinner + "\n\nYou can now leave and collect your winnings.");
+                    } else {
+                        alert.setHeaderText("Tournament Complete");
+                        alert.setContentText(finalLastWinner != null ? finalLastWinner : "The tournament has ended.");
+                    }
+
+                    alert.showAndWait();
+                });
+            }
         }
         // If I'm eliminated (but tournament not finished yet)
         else if (amIEliminated && !"WAITING".equals(phase)) {
-            Platform.runLater(() -> {
-                Alert alert = new Alert(Alert.AlertType.INFORMATION);
-                alert.setTitle("Eliminated");
-                alert.setHeaderText("You have been eliminated!");
-                alert.setContentText("You ran out of chips. You can leave or watch the rest of the tournament.");
-                alert.showAndWait();
-            });
+            if (!eliminatedAlertShown) {
+                eliminatedAlertShown = true;
+                Platform.runLater(() -> {
+                    Alert alert = new Alert(Alert.AlertType.INFORMATION);
+                    alert.setTitle("Eliminated");
+                    alert.setHeaderText("You have been eliminated!");
+                    alert.setContentText("You ran out of chips. You can leave or watch the rest of the tournament.");
+                    alert.showAndWait();
+                });
+            }
+        } else {
+            eliminatedAlertShown = false;
+            finishedAlertShown = false;
         }
 
         // Fetch and update ready status if in waiting phase
@@ -960,8 +1624,13 @@ public class GameScreen {
 
         // Update button states
         int gameCurrentBet = state.get("currentBet").getAsInt();
-        currentGameBet = gameCurrentBet;
-        updateButtonStates(isMyTurn, gameCurrentBet, myCurrentBet, myChips);
+        cachedIsMyTurn = isMyTurn;
+        cachedGameCurrentBet = gameCurrentBet;
+        cachedMyCurrentBet = myCurrentBet;
+        cachedMyChips = myChips;
+
+        boolean lockAllInputs = isInputLockedNow();
+        updateButtonStates(isMyTurn, gameCurrentBet, myCurrentBet, myChips, lockAllInputs);
 
         // Update My Hand
         playerHandBox.getChildren().clear();
@@ -1013,7 +1682,7 @@ public class GameScreen {
     /**
      * Creates a player avatar with styling.
      */
-    private PlayerAvatar createPlayerAvatar(String name, int chips, int bet, boolean folded, boolean eliminated, boolean isTurn, boolean isWinner, boolean isMe) {
+    private PlayerAvatar createPlayerAvatar(String name, int chips, int bet, boolean folded, boolean eliminated, boolean isTurn, boolean isWinner, boolean isMe, String positionTag) {
         PlayerAvatar avatar = new PlayerAvatar();
 
         // Container
@@ -1037,6 +1706,39 @@ public class GameScreen {
         avatar.avatar.setStroke(Color.WHITE);
         avatar.avatar.setStrokeWidth(2);
 
+        // Dealer / Blinds badge (D / SB / BB)
+        avatar.positionBadge = new Label(positionTag != null ? positionTag : "");
+        avatar.positionBadge.setVisible(positionTag != null && !positionTag.isBlank());
+        avatar.positionBadge.setManaged(positionTag != null && !positionTag.isBlank());
+        avatar.positionBadge.setFont(Font.font("Arial", FontWeight.BOLD, 9));
+
+        String badgeBg = "#ffffff";
+        String badgeText = "#000000";
+        if (positionTag != null) {
+            if (positionTag.contains("BB")) {
+                badgeBg = "#ff5252";
+                badgeText = "#ffffff";
+            } else if (positionTag.contains("SB")) {
+                badgeBg = "#4fc3f7";
+                badgeText = "#000000";
+            } else if (positionTag.contains("D")) {
+                badgeBg = "#ffffff";
+                badgeText = "#000000";
+            }
+        }
+        avatar.positionBadge.setStyle(
+            "-fx-background-color: " + badgeBg + ";" +
+            "-fx-text-fill: " + badgeText + ";" +
+            "-fx-padding: 2 6;" +
+            "-fx-background-radius: 10;" +
+            "-fx-border-color: rgba(0,0,0,0.35);" +
+            "-fx-border-width: 1;" +
+            "-fx-border-radius: 10;"
+        );
+
+        StackPane avatarStack = new StackPane();
+        avatarStack.getChildren().add(avatar.avatar);
+
         // Name
         avatar.nameLabel = new Label(name + (isMe ? " (You)" : ""));
         avatar.nameLabel.setFont(Font.font("Arial", FontWeight.BOLD, 12));
@@ -1053,14 +1755,26 @@ public class GameScreen {
         avatar.readyLabel.setStyle("-fx-text-fill: #FFD700;");
         avatar.readyLabel.setVisible(false);
 
-        // Bet
-        if (bet > 0) {
-            avatar.betLabel = new Label("Bet: $" + bet);
-            avatar.betLabel.setFont(Font.font("Arial", FontWeight.NORMAL, 10));
-            avatar.betLabel.setStyle("-fx-text-fill: #FFD700;");
-            avatar.container.getChildren().addAll(avatar.avatar, avatar.nameLabel, avatar.chipsLabel, avatar.readyLabel, avatar.betLabel);
+        // Bet chip (positioned on table near the player, not inside the avatar box)
+        avatar.betChipLabel = new Label();
+        avatar.betChipLabel.setFont(Font.font("Arial", FontWeight.BOLD, 11));
+        avatar.betChipLabel.setStyle(
+            "-fx-text-fill: #1a1a1a;" +
+            "-fx-background-color: #FFD54F;" +
+            "-fx-padding: 3 8;" +
+            "-fx-background-radius: 12;" +
+            "-fx-border-color: #5D4037;" +
+            "-fx-border-width: 1;" +
+            "-fx-border-radius: 12;" +
+            "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.45), 6, 0, 0, 2);"
+        );
+        avatar.betChipLabel.setVisible(false);
+        avatar.betChipLabel.setManaged(false);
+
+        if (avatar.positionBadge != null && avatar.positionBadge.isVisible()) {
+            avatar.container.getChildren().addAll(avatarStack, avatar.positionBadge, avatar.nameLabel, avatar.chipsLabel, avatar.readyLabel);
         } else {
-            avatar.container.getChildren().addAll(avatar.avatar, avatar.nameLabel, avatar.chipsLabel, avatar.readyLabel);
+            avatar.container.getChildren().addAll(avatarStack, avatar.nameLabel, avatar.chipsLabel, avatar.readyLabel);
         }
 
         // Folded indicator
@@ -1080,23 +1794,6 @@ public class GameScreen {
         }
 
         return avatar;
-    }
-
-    /**
-     * Shows the winner announcement.
-     */
-    private void showWinner(String winnerInfo) {
-        winnerLabel.setText("🏆 " + winnerInfo + " 🏆");
-        winnerLabel.setVisible(true);
-
-        // Auto-hide after 5 seconds
-        new Thread(() -> {
-            try {
-                Thread.sleep(5000);
-            } catch (InterruptedException e) {
-            }
-            Platform.runLater(() -> winnerLabel.setVisible(false));
-        }).start();
     }
 
     /**
@@ -1124,7 +1821,7 @@ public class GameScreen {
                 box.getChildren().add(cardLabel);
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            log.log(Level.FINE, "Failed to load card image: " + filename, e);
         }
     }
 
@@ -1133,48 +1830,22 @@ public class GameScreen {
      * HEARTS -> "AH.png"
      */
     private String getCardFilename(String rank, String suit) {
-        String r = "";
-        switch (rank) {
-            case "TWO":
-                r = "2";
-                break;
-            case "THREE":
-                r = "3";
-                break;
-            case "FOUR":
-                r = "4";
-                break;
-            case "FIVE":
-                r = "5";
-                break;
-            case "SIX":
-                r = "6";
-                break;
-            case "SEVEN":
-                r = "7";
-                break;
-            case "EIGHT":
-                r = "8";
-                break;
-            case "NINE":
-                r = "9";
-                break;
-            case "TEN":
-                r = "10";
-                break;
-            case "JACK":
-                r = "J";
-                break;
-            case "QUEEN":
-                r = "Q";
-                break;
-            case "KING":
-                r = "K";
-                break;
-            case "ACE":
-                r = "A";
-                break;
-        }
+        String r = switch (rank) {
+            case "TWO" -> "2";
+            case "THREE" -> "3";
+            case "FOUR" -> "4";
+            case "FIVE" -> "5";
+            case "SIX" -> "6";
+            case "SEVEN" -> "7";
+            case "EIGHT" -> "8";
+            case "NINE" -> "9";
+            case "TEN" -> "10";
+            case "JACK" -> "J";
+            case "QUEEN" -> "Q";
+            case "KING" -> "K";
+            case "ACE" -> "A";
+            default -> "";
+        };
 
         String s = suit.substring(0, 1); // "H", "D", "C", "S"
         return r + s + ".png";
@@ -1191,43 +1862,44 @@ public class GameScreen {
      * Start countdown timer.
      */
     private void startTimer(int seconds) {
-        stopTimer(); // Stop any existing timer
+        stopTimer();
+        if (seconds < 0) {
+            timerLabel.setText("");
+            return;
+        }
 
-        timerRunning = true;
-        timerThread = new Thread(() -> {
-            for (int i = seconds; i >= 0 && timerRunning; i--) {
-                final int timeLeft = i;
-                Platform.runLater(() -> {
-                    if (timeLeft <= 5) {
-                        timerLabel.setStyle("-fx-text-fill: #FF0000; -fx-font-weight: bold; -fx-font-size: 20px;");
-                    } else if (timeLeft <= 10) {
-                        timerLabel.setStyle("-fx-text-fill: #FFA500; -fx-font-weight: bold; -fx-font-size: 18px;");
-                    } else {
-                        timerLabel.setStyle("-fx-text-fill: #FF6347; -fx-font-weight: bold; -fx-font-size: 16px;");
-                    }
-                    timerLabel.setText("⏱ " + timeLeft + "s");
-                });
+        updateTimerLabel(seconds);
+        final int[] remaining = new int[] { seconds };
 
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    break;
-                }
+        countdownTimeline = new Timeline(new KeyFrame(Duration.seconds(1), evt -> {
+            remaining[0]--;
+            if (remaining[0] >= 0) {
+                updateTimerLabel(remaining[0]);
             }
+        }));
+        countdownTimeline.setCycleCount(seconds + 1);
+        countdownTimeline.setOnFinished(evt -> timerLabel.setText(""));
+        countdownTimeline.playFromStart();
+    }
 
-            Platform.runLater(() -> timerLabel.setText(""));
-        });
-        timerThread.setDaemon(true);
-        timerThread.start();
+    private void updateTimerLabel(int timeLeft) {
+        if (timeLeft <= 5) {
+            timerLabel.setStyle("-fx-text-fill: #FF0000; -fx-font-weight: bold; -fx-font-size: 20px;");
+        } else if (timeLeft <= 10) {
+            timerLabel.setStyle("-fx-text-fill: #FFA500; -fx-font-weight: bold; -fx-font-size: 18px;");
+        } else {
+            timerLabel.setStyle("-fx-text-fill: #FF6347; -fx-font-weight: bold; -fx-font-size: 16px;");
+        }
+        timerLabel.setText("⏱ " + timeLeft + "s");
     }
 
     /**
      * Stop the countdown timer.
      */
     private void stopTimer() {
-        timerRunning = false;
-        if (timerThread != null) {
-            timerThread.interrupt();
+        if (countdownTimeline != null) {
+            countdownTimeline.stop();
+            countdownTimeline = null;
         }
         timerLabel.setText("");
     }

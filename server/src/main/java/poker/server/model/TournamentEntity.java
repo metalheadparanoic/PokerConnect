@@ -109,6 +109,14 @@ public class TournamentEntity {
     public void setStartingChips(Integer startingChips) {
         this.startingChips = startingChips;
     }
+
+    public Long getHostId() {
+        return hostId;
+    }
+
+    public void setHostId(Long hostId) {
+        this.hostId = hostId;
+    }
     
     public Long getWinnerId() {
         return winnerId;

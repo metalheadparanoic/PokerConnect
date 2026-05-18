@@ -146,7 +146,7 @@ public class HistoryScreen {
             "-fx-border-radius: 10;"
         );
         historyTable.setPrefHeight(400);
-        historyTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        historyTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         
         TableColumn<Map<String, Object>, String> nameCol = new TableColumn<>("🎰 Tournament");
         nameCol.setCellValueFactory(data -> {

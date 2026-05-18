@@ -5,8 +5,6 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Entity representing the persistent game state for a tournament.
@@ -55,6 +53,16 @@ public class GameStateEntity {
     
     @Column(name = "round_number")
     private Integer roundNumber = 0;
+
+    // Betting-round tracking
+    @Column(name = "players_to_act")
+    private Integer playersToAct = 0;
+
+    @Column(name = "last_aggressor_position")
+    private Integer lastAggressorPosition = -1;
+
+    @Column(name = "last_raise_size")
+    private Integer lastRaiseSize = 0;
     
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt = LocalDateTime.now();
@@ -174,6 +182,30 @@ public class GameStateEntity {
     
     public void setRoundNumber(Integer roundNumber) {
         this.roundNumber = roundNumber;
+    }
+
+    public Integer getPlayersToAct() {
+        return playersToAct;
+    }
+
+    public void setPlayersToAct(Integer playersToAct) {
+        this.playersToAct = playersToAct;
+    }
+
+    public Integer getLastAggressorPosition() {
+        return lastAggressorPosition;
+    }
+
+    public void setLastAggressorPosition(Integer lastAggressorPosition) {
+        this.lastAggressorPosition = lastAggressorPosition;
+    }
+
+    public Integer getLastRaiseSize() {
+        return lastRaiseSize;
+    }
+
+    public void setLastRaiseSize(Integer lastRaiseSize) {
+        this.lastRaiseSize = lastRaiseSize;
     }
     
     public LocalDateTime getCreatedAt() {

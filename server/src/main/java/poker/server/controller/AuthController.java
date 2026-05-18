@@ -181,9 +181,9 @@ public class AuthController {
                     .body(Map.of("error", "Invalid username or password"));
             }
             // PROTECȚIE LA FALIMENT
-            // Dacă jucătorul a pierdut tot, îi resetăm banii la 1000 la logare
-            if (player.getMoney() < 1000) {
-                player.setMoney(1000); 
+            // Dacă jucătorul a pierdut tot, îi resetăm chipurile la 1000 la logare
+            if (player.getChips() < 1000) {
+                player.setChips(1000);
                 playerRepository.save(player);
             }
             
@@ -227,7 +227,7 @@ public class AuthController {
             response.put("email", player.getEmail());
             response.put("totalScore", player.getTotalScore());
             response.put("tournamentsWon", player.getTournamentsWon());
-            response.put("money", player.getMoney());
+            response.put("chips", player.getChips());
             response.put("createdAt", player.getCreatedAt());
             
             return ResponseEntity.ok(response);
