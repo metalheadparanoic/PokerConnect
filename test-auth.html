@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Test Registration & Login</title>
+    <style>
+      body {
+        font-family: Arial;
+        padding: 20px;
+        background: #2d5016;
+        color: white;
+      }
+      .container {
+        max-width: 600px;
+        margin: 0 auto;
+        background: #1a3010;
+        padding: 30px;
+        border-radius: 10px;
+      }
+      h2 {
+        color: #ffd700;
+      }
+      input,
+      button {
+        width: 100%;
+        padding: 10px;
+        margin: 5px 0;
+        font-size: 14px;
+      }
+      button {
+        background: #ffd700;
+        border: none;
+        cursor: pointer;
+        font-weight: bold;
+      }
+      .result {
+        margin-top: 20px;
+        padding: 15px;
+        background: #3a6020;
+        border-radius: 5px;
+      }
+      .error {
+        background: #8b0000;
+      }
+      .success {
+        background: #006400;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>Test Registration (BCrypt)</h2>
+      <input
+        type="text"
+        id="regUser"
+        placeholder="Username (3-20 chars, alphanumeric)"
+        value="testuser"
+      />
+      <input
+        type="email"
+        id="regEmail"
+        placeholder="Email"
+        value="test@example.com"
+      />
+      <input
+        type="password"
+        id="regPass"
+        placeholder="Password (min 6 chars)"
+        value="securepass123"
+      />
+      <button onclick="testRegister()">Register</button>
+
+      <h2 style="margin-top: 30px">Test Login (BCrypt Verification)</h2>
+      <input
+        type="text"
+        id="loginUser"
+        placeholder="Username"
+        value="testuser"
+      />
+      <input
+        type="password"
+        id="loginPass"
+        placeholder="Password"
+        value="securepass123"
+      />
+      <button onclick="testLogin()">Login</button>
+
+      <div id="result" class="result" style="display: none"></div>
+    </div>
+
+    <script>
+      const API_URL = "http://localhost:8080/api";
+
+      async function testRegister() {
+        const username = document.getElementById("regUser").value;
+        const email = document.getElementById("regEmail").value;
+        const password = document.getElementById("regPass").value;
+
+        try {
+          const response = await fetch(`${API_URL}/register`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, email, password }),
+          });
+
+          const data = await response.json();
+          showResult(response.ok, "Registration", data);
+        } catch (error) {
+          showResult(false, "Registration", { error: error.message });
+        }
+      }
+
+      async function testLogin() {
+        const username = document.getElementById("loginUser").value;
+        const password = document.getElementById("loginPass").value;
+
+        try {
+          const response = await fetch(`${API_URL}/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+
+          const data = await response.json();
+          showResult(response.ok, "Login", data);
+        } catch (error) {
+          showResult(false, "Login", { error: error.message });
+        }
+      }
+
+      function showResult(success, action, data) {
+        const resultDiv = document.getElementById("result");
+        resultDiv.style.display = "block";
+        resultDiv.className = success ? "result success" : "result error";
+        resultDiv.innerHTML = `<strong>${action} ${
+          success ? "SUCCESS" : "FAILED"
+        }:</strong><br><pre>${JSON.stringify(data, null, 2)}</pre>`;
+      }
+    </script>
+  </body>
+</html>

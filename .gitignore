@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE (IntelliJ IDEA, Eclipse, VS Code)
+.idea/
+*.iml
+out/
+.vscode/
+.classpath
+.project
+.settings/
+
+# Fisiere compilate Java
+*.class
+
+# Log-uri
+*.log
+
+# Pachete executabile (generate local)
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+
+# Fisiere specifice sistemului de operare
+.DS_Store
+Thumbs.db
