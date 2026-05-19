@@ -12,9 +12,9 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextField;
 import javafx.scene.effect.DropShadow;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
-import javafx.scene.layout.HBox;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
@@ -76,7 +76,7 @@ public class LoginScreen {
         suitsTop.setFont(Font.font("Arial", FontWeight.BOLD, 28));
         suitsTop.setStyle("-fx-text-fill: #ffd700;");
         
-        Label title = new Label("TEXAS HOLD'EM");
+        Label title = new Label("Poker Connect");
         title.setFont(Font.font("Arial", FontWeight.BOLD, 36));
         title.setStyle(
             "-fx-text-fill: linear-gradient(to bottom, #ffd700, #ffed4e);" +

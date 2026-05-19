@@ -70,6 +70,68 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     
     private static final int TURN_TIMEOUT_SECONDS = 30;
     private static final int HAND_START_DELAY_SECONDS = 3;
+
+    /**
+     * Called from REST controllers when a player leaves a tournament mid-game.
+     * Marks the player as folded and forces elimination handling, then broadcasts.
+     */
+    public void handlePlayerLeft(@NonNull Long tournamentId, @NonNull Long playerId) {
+        try {
+            GameState game = gameService.getGame(tournamentId);
+            if (game == null) {
+                return;
+            }
+
+            GamePlayer leavingPlayer = null;
+            for (GamePlayer p : game.getPlayers()) {
+                if (playerId.equals(p.getPlayerId())) {
+                    leavingPlayer = p;
+                    break;
+                }
+            }
+            if (leavingPlayer == null) {
+                return;
+            }
+
+            // Fold immediately so the hand can progress.
+            leavingPlayer.setFolded(true);
+
+            // Force elimination by setting chips to 0; GameService will mark eliminated.
+            leavingPlayer.setChips(0);
+
+            // If it was their turn, advance turn to a valid player.
+            if (!game.getPlayers().isEmpty()) {
+                int currentIndex = game.getCurrentPlayerIndex();
+                if (currentIndex >= 0 && currentIndex < game.getPlayers().size()) {
+                    GamePlayer current = game.getPlayers().get(currentIndex);
+                    if (playerId.equals(current.getPlayerId())) {
+                        int attempts = 0;
+                        do {
+                            game.setCurrentPlayerIndex((game.getCurrentPlayerIndex() + 1) % game.getPlayers().size());
+                            current = game.getPlayers().get(game.getCurrentPlayerIndex());
+                            attempts++;
+                        } while ((current.isFolded() || current.isEliminated())
+                                && attempts <= game.getPlayers().size());
+                    }
+                }
+            }
+
+            // Update eliminations in DB + in-memory state.
+            gameService.checkEliminations(tournamentId);
+
+            // Possibly ends hand/tournament.
+            checkEarlyWinner(tournamentId);
+
+            broadcastGameState(tournamentId);
+
+            // Reset turn timer for the new current player.
+            cancelTurnTimer(tournamentId);
+            startTurnTimer(tournamentId);
+        } catch (Exception e) {
+            System.err.println("Error handling player left: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
     
     /**
      * Internal helper class to link a WebSocket session to a specific player and tournament.
