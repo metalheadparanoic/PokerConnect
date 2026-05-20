@@ -750,7 +750,7 @@ public class GameService {
                         int prizePool = tournament.getBuyIn() * totalPlayers;
 
                         PlayerEntity winnerPlayer = winnerParticipant.getPlayer();
-                        winnerPlayer.setChips(winnerPlayer.getChips() + prizePool);
+                        winnerPlayer.setMoney(winnerPlayer.getMoney() + prizePool);
                         winnerPlayer.setTournamentsWon(winnerPlayer.getTournamentsWon() + 1);
                         playerRepository.save(winnerPlayer);
 
@@ -805,7 +805,7 @@ public class GameService {
         // Award prize to winner
         PlayerEntity winnerPlayer = playerRepository.findById(winner.getPlayerId()).orElse(null);
         if (winnerPlayer != null) {
-            winnerPlayer.setChips(winnerPlayer.getChips() + prizePool);
+            winnerPlayer.setMoney(winnerPlayer.getMoney() + prizePool);
             winnerPlayer.setTournamentsWon(winnerPlayer.getTournamentsWon() + 1);
             playerRepository.save(winnerPlayer);
 
